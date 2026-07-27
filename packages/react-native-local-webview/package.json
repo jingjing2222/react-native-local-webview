@@ -25,7 +25,17 @@
     "url": "git+https://github.com/jingjing2222/react-native-local-webview.git"
   },
   "files": [
-    "dist"
+    "dist",
+    "android/CMakeLists.txt",
+    "android/build.gradle",
+    "android/gradle.properties",
+    "android/src",
+    "ios",
+    "nitrogen",
+    "src/**/*.nitro.ts",
+    "nitro.json",
+    "react-native.config.cjs",
+    "ReactNativeLocalWebView.podspec"
   ],
   "type": "module",
   "exports": {
@@ -40,6 +50,7 @@
   "scripts": {
     "clean": "del-cli dist",
     "build": "tsdown",
+    "nitrogen": "nitrogen",
     "prepare": "yarn build",
     "publint": "publint --strict",
     "typecheck": "tsc"
@@ -63,15 +74,20 @@
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
     "create-vite": "9.1.1",
+    "nitrogen": "0.36.1",
     "react": "19.2.3",
     "react-native": "0.85.0",
+    "react-native-nitro-modules": "0.36.1",
     "react-native-webview": "13.16.0",
     "react-test-renderer": "19.2.3",
+    "tsdown": "0.22.14",
+    "typescript": "6.0.3",
     "vitest": "4.1.10"
   },
   "peerDependencies": {
     "react": "*",
     "react-native": "*",
+    "react-native-nitro-modules": "*",
     "react-native-webview": "*"
   },
   "engines": {

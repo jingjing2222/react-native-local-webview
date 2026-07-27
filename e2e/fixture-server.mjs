@@ -18,7 +18,29 @@ const PADDING = Buffer.alloc(1024 * 1024);
 const GAME_SIZES = new Set([50, 200, 500]);
 const RESOURCE_COUNTS = new Set([100, 500, 1000]);
 const COOKIE = 'local-webview-benchmark=allowed';
-const ETAG_VERSION = 'v2';
+const ETAG_VERSION = 'v3';
+const COMPATIBILITY_DOCUMENT = Buffer.from(`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Local WebView compatibility</title></head>
+<body>
+  <script>
+    addEventListener('DOMContentLoaded', () => {
+      history.replaceState({ step: 0 }, '', '/compatibility/index.html');
+      history.pushState({ step: 1 }, '', '/compatibility/one');
+      const object = JSON.parse(window.ReactNativeWebView.injectedObjectJson());
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        channel: 'compatibility',
+        before: globalThis.__beforeContentLoaded === true,
+        history: history.state?.step === 1 && location.pathname.endsWith('/one'),
+        historyState: history.state,
+        object: object.compatibility === true,
+        origin: location.origin,
+        pathname: location.pathname
+      }));
+    });
+  </script>
+</body>
+</html>`);
 
 const state = {
   completed: false,
@@ -230,7 +252,16 @@ async function respondPaddedData(
   response.end();
 }
 
-function gameDocument(prefix, sizeMiB) {
+function benchmarkQuery(url) {
+  const runId = url.searchParams.get('__benchmarkRun');
+  return runId ? `?__benchmarkRun=${encodeURIComponent(runId)}` : '';
+}
+
+function fixtureAsset(prefix, name, query) {
+  return `${prefix}/${name}${query}`;
+}
+
+function gameDocument(prefix, sizeMiB, query) {
   return Buffer.from(`<!doctype html>
 <html lang="en">
 <head>
@@ -251,14 +282,21 @@ function gameDocument(prefix, sizeMiB) {
       sizeMiB: ${sizeMiB},
       startedAt: performance.now()
     };
+    globalThis.__LOCAL_WEBVIEW_BENCHMARK_TIMEOUT__ = setTimeout(() => {
+      globalThis.ReactNativeWebView?.postMessage(JSON.stringify({
+        channel: 'local-webview-benchmark:page',
+        kind: 'error',
+        message: 'Remote WebView did not load the benchmark runtime within 30 seconds.'
+      }));
+    }, 30000);
   </script>
-  <script src="${prefix}/Builds.loader.js"></script>
-  <script src="${prefix}/benchmark.js"></script>
+  <script src="${fixtureAsset(prefix, 'Builds.loader.js', query)}"></script>
+  <script src="${fixtureAsset(prefix, 'benchmark.js', query)}"></script>
 </body>
 </html>`);
 }
 
-function benchmarkScript(prefix) {
+function benchmarkScript(prefix, query) {
   return Buffer.from(`
 (() => {
   const state = globalThis.__LOCAL_WEBVIEW_BENCHMARK__;
@@ -269,11 +307,17 @@ function benchmarkScript(prefix) {
   };
   const timed = async (name, operation) => {
     const start = performance.now();
-    const value = await operation();
-    return { name, milliseconds: performance.now() - start, value };
+    try {
+      const value = await operation();
+      return { name, milliseconds: performance.now() - start, value };
+    } catch (error) {
+      throw new Error(
+        name + ': ' + String(error?.message || error) + '\\n' + String(error?.stack || '')
+      );
+    }
   };
   const workerProbe = () => new Promise((resolve, reject) => {
-    const worker = new Worker(${JSON.stringify(`${prefix}/probe.worker.js`)});
+    const worker = new Worker(${JSON.stringify(fixtureAsset(prefix, 'probe.worker.js', query))});
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error('Worker probe timed out'));
@@ -302,7 +346,7 @@ function benchmarkScript(prefix) {
   void (async () => {
     document.cookie = ${JSON.stringify(`${COOKIE}; Path=/; SameSite=Strict`)};
     const range = await timed('range', async () => {
-      const response = await fetch(${JSON.stringify(`${prefix}/payload.data`)}, {
+      const response = await fetch(${JSON.stringify(fixtureAsset(prefix, 'payload.data', query))}, {
         headers: { Range: 'bytes=1024-65535' }
       });
       return {
@@ -322,15 +366,15 @@ function benchmarkScript(prefix) {
         })
       : { name: 'cookie', milliseconds: 0, value: { skipped: true } };
     const payload = await timed('payload', async () => {
-      const response = await fetch(${JSON.stringify(`${prefix}/payload.data`)});
+      const response = await fetch(${JSON.stringify(fixtureAsset(prefix, 'payload.data', query))});
       return { bytes: await readBody(response), status: response.status };
     });
     const unity = await timed('unity', async () => {
       const canvas = document.querySelector('#unity-canvas');
       const config = {
-        dataUrl: ${JSON.stringify(`${prefix}/Builds.data`)},
-        frameworkUrl: ${JSON.stringify(`${prefix}/Builds.framework.js`)},
-        codeUrl: ${JSON.stringify(`${prefix}/Builds.wasm`)},
+        dataUrl: ${JSON.stringify(fixtureAsset(prefix, 'Builds.data', query))},
+        frameworkUrl: ${JSON.stringify(fixtureAsset(prefix, 'Builds.framework.js', query))},
+        codeUrl: ${JSON.stringify(fixtureAsset(prefix, 'Builds.wasm', query))},
         streamingAssetsUrl: ${JSON.stringify(`${prefix}/StreamingAssets`)},
         companyName: 'react-native-local-webview',
         productName: 'Wordly benchmark fixture',
@@ -342,6 +386,7 @@ function benchmarkScript(prefix) {
       return { canvasHeight: canvas.height, canvasWidth: canvas.width };
     });
     status.textContent = 'Benchmark ready';
+    clearTimeout(globalThis.__LOCAL_WEBVIEW_BENCHMARK_TIMEOUT__);
     post({
       kind: 'ready',
       metrics: {
@@ -356,17 +401,21 @@ function benchmarkScript(prefix) {
       }
     });
   })().catch((error) => {
+    clearTimeout(globalThis.__LOCAL_WEBVIEW_BENCHMARK_TIMEOUT__);
     status.textContent = String(error?.message || error);
-    post({ kind: 'error', message: String(error?.stack || error) });
+    post({
+      kind: 'error',
+      message: String(error?.message || error) + '\\n' + String(error?.stack || '')
+    });
   });
 })();
 `);
 }
 
-function resourceDocument(prefix, count) {
+function resourceDocument(prefix, count, query) {
   const scripts = Array.from(
     { length: count },
-    (_, index) => `<script src="${prefix}/assets/${index}.js"></script>`
+    (_, index) => `<script src="${fixtureAsset(prefix, `assets/${index}.js`, query)}"></script>`
   ).join('');
   return Buffer.from(`<!doctype html><html><head><meta charset="utf-8"></head><body>
 ${scripts}
@@ -475,14 +524,156 @@ async function handleFixture(request, response, url) {
     return;
   }
 
+  if (pathname === '/compatibility/index.html') {
+    respondBytes(request, response, pathname, COMPATIBILITY_DOCUMENT, {
+      etag: requestEtag(pathname, true),
+    });
+    return true;
+  }
+
+  if (pathname === '/compatibility/method-routing') {
+    if (request.method === 'POST') {
+      const body = await requestBody(request);
+      const transport =
+        body.transport === 'fetch' || body.transport === 'xhr' ? body.transport : undefined;
+      respondBytes(
+        request,
+        response,
+        pathname,
+        Buffer.from(transport === undefined ? 'post-body-mismatch' : `${transport}-ok`),
+        {
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          status: transport === undefined ? 400 : 200,
+        }
+      );
+      return true;
+    }
+    respondBytes(
+      request,
+      response,
+      pathname,
+      Buffer.from(`<!doctype html>
+      <script src="/compatibility/range-asset.js"></script>
+      <script>
+        const fetchRequest = fetch(location.href, {
+          body: JSON.stringify({ transport: 'fetch' }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST'
+        }).then(response => response.text());
+        const xhrRequest = new Promise((resolve, reject) => {
+          const request = new XMLHttpRequest();
+          request.open('POST', location.href);
+          request.setRequestHeader('Content-Type', 'application/json');
+          request.onload = () => resolve(request.responseText);
+          request.onerror = () => reject(new Error('XHR failed'));
+          request.send(JSON.stringify({ transport: 'xhr' }));
+        });
+        const rangeRequest = fetch('/compatibility/range-asset.js', {
+          headers: { Range: 'bytes=0-1023' }
+        })
+          .then(async response => {
+            const source = await response.text();
+            const contentRange = response.headers.get('Content-Range') || '';
+            return response.status === 206 &&
+              contentRange.startsWith('bytes 0-1023/') &&
+              source.includes('local-range-ok')
+              ? 'range-ok'
+              : 'range-failed';
+          });
+        Promise.all([fetchRequest, xhrRequest, rangeRequest])
+          .then(values => {
+            window.ReactNativeWebView.postMessage('method-routing:' + values.join(','));
+          })
+          .catch(error => {
+            window.ReactNativeWebView.postMessage('method-routing:error:' + error.message);
+          });
+      </script>`),
+      {
+        etag: requestEtag(pathname, true),
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      }
+    );
+    return true;
+  }
+
+  if (pathname === '/compatibility/range-asset.js') {
+    respondBytes(
+      request,
+      response,
+      pathname,
+      Buffer.from(
+        `globalThis.__localRangeAsset = 'local-range-ok';\n${'// range padding\n'.repeat(128)}`
+      ),
+      {
+        etag: requestEtag(pathname, true),
+        headers: { 'Content-Type': 'text/javascript; charset=utf-8' },
+      }
+    );
+    return true;
+  }
+
+  if (pathname === '/compatibility/http-error') {
+    respondBytes(request, response, pathname, Buffer.from('expected-http-error'), {
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      status: 418,
+    });
+    return true;
+  }
+
+  if (pathname === '/compatibility/frame-child') {
+    respondBytes(
+      request,
+      response,
+      pathname,
+      Buffer.from('<!doctype html><html><body>child frame</body></html>'),
+      { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    );
+    return true;
+  }
+
+  if (pathname === '/compatibility/basic-auth') {
+    const authorization = request.headers.authorization ?? '';
+    if (authorization !== `Basic ${Buffer.from('compatibility:password').toString('base64')}`) {
+      respondBytes(request, response, pathname, Buffer.from('authentication-required'), {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'WWW-Authenticate': 'Basic realm="local-webview-compatibility"',
+        },
+        status: 401,
+      });
+      return true;
+    }
+    respondBytes(
+      request,
+      response,
+      pathname,
+      Buffer.from(`<!doctype html><script>
+        window.ReactNativeWebView.postMessage('basic-auth-ok');
+      </script>`),
+      { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    );
+    return true;
+  }
+
+  if (pathname === '/compatibility/download') {
+    respondBytes(request, response, pathname, Buffer.from('download-fixture'), {
+      headers: {
+        'Content-Disposition': 'attachment; filename="compatibility.txt"',
+        'Content-Type': 'application/octet-stream',
+      },
+    });
+    return true;
+  }
+
   const resourceMatch = /^\/resources\/(100|500|1000)(\/.*)?$/.exec(pathname);
   if (resourceMatch) {
     const count = Number(resourceMatch[1]);
     if (!RESOURCE_COUNTS.has(count)) return false;
     const prefix = `/resources/${count}`;
+    const query = benchmarkQuery(url);
     let body;
     if (!resourceMatch[2] || resourceMatch[2] === '/index.html') {
-      body = resourceDocument(prefix, count);
+      body = resourceDocument(prefix, count, query);
     } else {
       const asset = /^\/assets\/(\d+)\.js$/.exec(resourceMatch[2]);
       if (!asset || Number(asset[1]) >= count) return false;
@@ -504,8 +695,15 @@ async function handleFixture(request, response, url) {
   if (!GAME_SIZES.has(sizeMiB)) return false;
   const prefix = `/${kind}/${sizeMiB}/${gameMatch[3]}`;
   const suffix = gameMatch[4] || '/index.html';
-  const headers = cspHeaders(pathname);
-  if (kind === 'edge' && !hasBenchmarkCookie(request)) {
+  const query = benchmarkQuery(url);
+  const hasCookie = hasBenchmarkCookie(request);
+  const headers = {
+    ...cspHeaders(pathname),
+    ...(kind === 'edge' && suffix === '/index.html' && !hasCookie
+      ? { 'Set-Cookie': `${COOKIE}; Path=/; SameSite=Strict; Secure` }
+      : {}),
+  };
+  if (kind === 'edge' && !hasCookie && suffix !== '/index.html') {
     respondBytes(request, response, pathname, Buffer.from('cookie-required'), {
       headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' },
       status: 401,
@@ -514,14 +712,14 @@ async function handleFixture(request, response, url) {
   }
   const etag = requestEtag(pathname, hasEtag);
   if (suffix === '/index.html') {
-    respondBytes(request, response, pathname, gameDocument(prefix, sizeMiB), {
+    respondBytes(request, response, pathname, gameDocument(prefix, sizeMiB, query), {
       etag,
       headers,
     });
     return true;
   }
   if (suffix === '/benchmark.js') {
-    respondBytes(request, response, pathname, benchmarkScript(prefix), { etag, headers });
+    respondBytes(request, response, pathname, benchmarkScript(prefix, query), { etag, headers });
     return true;
   }
   if (suffix === '/probe.worker.js') {

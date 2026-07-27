@@ -4,12 +4,17 @@ set -euo pipefail
 profile="${1:-}"
 suite="${2:-full}"
 origin="${3:-https://macmini.taile38920.ts.net:8443}"
+runtime="${4:-native}"
 if [[ "$profile" != "low" && "$profile" != "latest" ]]; then
-  echo "Usage: $0 low|latest [full|smoke] [origin]" >&2
+  echo "Usage: $0 low|latest [full|smoke|props] [origin] [bridge|native|remote]" >&2
   exit 2
 fi
-if [[ "$suite" != "full" && "$suite" != "smoke" ]]; then
-  echo "suite must be full or smoke" >&2
+if [[ "$suite" != "full" && "$suite" != "smoke" && "$suite" != "props" ]]; then
+  echo "suite must be full, smoke, or props" >&2
+  exit 2
+fi
+if [[ "$runtime" != "bridge" && "$runtime" != "native" && "$runtime" != "remote" ]]; then
+  echo "runtime must be bridge, native, or remote" >&2
   exit 2
 fi
 
@@ -19,7 +24,7 @@ export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/c
 
 artifact_root="${BENCHMARK_ARTIFACTS:-e2e/artifacts}"
 mkdir -p "$artifact_root"
-run_id="android-${profile}-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)"
+run_id="${BENCHMARK_RUN_ID:-android-${profile}-${runtime}-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)}"
 result_path="$artifact_root/${run_id}.json"
 memory_path="$artifact_root/${run_id}-memory.csv"
 environment_path="$artifact_root/${run_id}-environment.txt"
@@ -109,8 +114,70 @@ fi
 "${adb_target[@]}" shell settings put global animator_duration_scale 0
 "${adb_target[@]}" install -r "$apk"
 
+if [[ "$runtime" != "remote" || "$suite" == "props" ]]; then
+prop_run_id="android-${profile}-props-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)"
+prop_result_path="$artifact_root/${prop_run_id}.json"
+prop_url="$(
+  node -e '
+    const [origin, runId, profile] = process.argv.slice(1);
+    const url = new URL("local-webview-benchmark://compatibility");
+    url.searchParams.set("origin", origin);
+    url.searchParams.set("runId", runId);
+    url.searchParams.set("platform", "android");
+    url.searchParams.set("profile", profile);
+    process.stdout.write(url.href);
+  ' "$origin" "$prop_run_id" "$profile"
+)"
+"${adb_target[@]}" shell am force-stop localwebview.example
+"${adb_target[@]}" shell am start \
+  -W \
+  -a android.intent.action.VIEW \
+  -d "'$prop_url'" \
+  -p localwebview.example
+prop_completed=0
+for _ in $(seq 1 600); do
+  response="$(curl --fail --silent --show-error http://127.0.0.1:4173/__control/results || true)"
+  if [[ "$(jq -r '.runId // ""' <<<"$response" 2>/dev/null || true)" == "$prop_run_id" ]] &&
+    [[ "$(jq -r '.completed == true' <<<"$response" 2>/dev/null || echo false)" == "true" ]]; then
+    printf '%s\n' "$response" >"$prop_result_path"
+    prop_completed=1
+    break
+  fi
+  if ! "${adb_target[@]}" shell pidof localwebview.example >/dev/null 2>&1; then
+    echo "Android prop E2E process exited before completing." >&2
+    break
+  fi
+  sleep 1
+done
+if [[ "$prop_completed" -ne 1 ]]; then
+  "${adb_target[@]}" logcat -d >"$artifact_root/${prop_run_id}-logcat.txt"
+  echo "Android prop E2E timed out: $prop_run_id" >&2
+  exit 1
+fi
+jq -e '
+  ([.reports[] | select(.kind == "complete") | .error // empty] | length) == 0 and
+  ([.reports[] | select(.kind == "webview-prop-compatibility")] | length) == 1 and
+  ([.reports[] | select(.kind == "webview-prop-compatibility") |
+    (.total > 0 and
+      (.passed | length) == .total and
+      .behaviorTotal > 0 and
+      (.behaviorPassed | length) == .behaviorTotal)] |
+    all)
+' "$prop_result_path" >/dev/null
+
+if [[ "$suite" == "props" ]]; then
+  jq -r '
+    .reports[]
+    | select(.kind == "webview-prop-compatibility")
+    | "Android \(.profile): \(.passed | length)/\(.total) props and \(.behaviorPassed | length) behaviors passed in \(.durationMilliseconds) ms"
+  ' "$prop_result_path"
+  exit 0
+fi
+fi
+
 {
   echo "profile=$profile"
+  echo "runtime=$runtime"
   echo "avd=$avd"
   echo "configured_memory_mib=$memory_mib"
   echo "configured_cores=$cores"
@@ -136,22 +203,23 @@ printf 'timestamp_ms,total_pss_kib,total_rss_kib\n' >"$memory_path"
         } END { printf "%s,%s", pss + 0, rss + 0 }'
     )"
     printf '%s,%s\n' "$timestamp_ms" "$totals" >>"$memory_path"
-    sleep 2
+    sleep 0.5
   done
 ) &
 sampler_pid=$!
 
 benchmark_url="$(
   node -e '
-    const [origin, runId, profile, suite] = process.argv.slice(1);
+    const [origin, runId, profile, runtime, suite] = process.argv.slice(1);
     const url = new URL("local-webview-benchmark://run");
     url.searchParams.set("origin", origin);
     url.searchParams.set("runId", runId);
     url.searchParams.set("platform", "android");
     url.searchParams.set("profile", profile);
+    url.searchParams.set("runtime", runtime);
     url.searchParams.set("suite", suite);
     process.stdout.write(url.href);
-  ' "$origin" "$run_id" "$profile" "$suite"
+  ' "$origin" "$run_id" "$profile" "$runtime" "$suite"
 )"
 
 "${adb_target[@]}" logcat -c
@@ -193,9 +261,11 @@ for _ in $(seq 1 10800); do
         -X POST \
         --data "$(
           node -e '
-            const [error, platform, profile, runId, suite] = process.argv.slice(1);
-            process.stdout.write(JSON.stringify({ error, kind: "complete", platform, profile, runId, suite }));
-          ' "$failure" android "$profile" "$run_id" "$suite"
+            const [error, platform, profile, runId, runtime, suite] = process.argv.slice(1);
+            process.stdout.write(JSON.stringify({
+              error, kind: "complete", platform, profile, runId, runtime, suite
+            }));
+          ' "$failure" android "$profile" "$run_id" "$runtime" "$suite"
         )" \
         http://127.0.0.1:4173/__control/complete \
         >/dev/null

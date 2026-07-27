@@ -1,0 +1,24 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["localwebview"],
+  "ios": {
+    "iosModuleName": "ReactNativeLocalWebView"
+  },
+  "android": {
+    "androidNamespace": ["localwebview"],
+    "androidCxxLibName": "reactnativelocalwebview"
+  },
+  "autolinking": {
+    "NativeLocalWebView": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "HybridLocalWebView"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "HybridNativeLocalWebView"
+      }
+    }
+  },
+  "ignorePaths": ["node_modules", "test"]
+}

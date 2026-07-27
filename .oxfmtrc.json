@@ -2,9 +2,10 @@
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "ignorePatterns": [
     ".yarn/**",
-    "example/android/**",
-    "example/ios/**",
+    "examples/showcase/android/**",
+    "examples/showcase/ios/**",
     "dist/**",
+    "packages/react-native-local-webview/nitrogen/**",
     "node_modules/**",
     "yarn.lock"
   ],

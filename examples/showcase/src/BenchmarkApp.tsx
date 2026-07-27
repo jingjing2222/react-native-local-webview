@@ -3,20 +3,27 @@ import { StyleSheet, Text, View } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import {
   createReactNativeBlobUtilCacheAdapter,
-  LocalWebView,
+  LegacyLocalWebView,
+  NativeLocalWebView,
+  resolveWebBundle,
   type LocalWebViewCacheAdapter,
   type MirroredWebBundle,
 } from 'react-native-local-webview';
+import { WebView } from 'react-native-webview';
 
 const MIB = 1024 * 1024;
 const COOKIE = 'local-webview-benchmark=allowed';
 const MOUNT_TIMEOUT_MS = 45 * 60 * 1000;
+const REMOTE_OFFLINE_OBSERVATION_MS = 30 * 1000;
+
+type BenchmarkRuntime = 'bridge' | 'native' | 'remote';
 
 type BenchmarkConfiguration = {
   origin: string;
   platform: string;
   profile: string;
   runId: string;
+  runtime: BenchmarkRuntime;
   suite: 'full' | 'smoke';
 };
 
@@ -51,9 +58,18 @@ type ActiveMount = {
 type MountResult =
   | {
       bridge: ReturnType<typeof finishBridgeMetrics>;
-      bundle: MirroredWebBundle;
-      bundleReadyMilliseconds: number;
+      bundle?: MirroredWebBundle;
       page: Record<string, unknown>;
+      pageReadyMilliseconds: number;
+      storageReadyMilliseconds: number;
+      storedBundle: MirroredWebBundle;
+      totalMilliseconds: number;
+    }
+  | {
+      bridge: ReturnType<typeof finishBridgeMetrics>;
+      navigationReadyMilliseconds: number;
+      page: Record<string, unknown>;
+      pageReadyMilliseconds: number;
       totalMilliseconds: number;
     }
   | {
@@ -65,27 +81,36 @@ type MountResult =
 type PendingMount = {
   bridge: BridgeMetrics;
   bundle?: MirroredWebBundle;
-  bundleReadyMilliseconds?: number;
   expectedError: boolean;
+  navigationReadyMilliseconds?: number;
   page?: Record<string, unknown>;
+  pageReadyMilliseconds?: number;
   reject: (error: Error) => void;
   resolve: (result: MountResult) => void;
+  runtime: BenchmarkRuntime;
   startedAt: number;
+  storageReadyMilliseconds?: number;
+  storedBundle?: MirroredWebBundle;
   timeout: ReturnType<typeof setTimeout>;
 };
 
 function parseConfiguration(url: string): BenchmarkConfiguration | undefined {
   try {
+    if (!url.startsWith('local-webview-benchmark://run')) return undefined;
     const parsed = new URL(url);
     if (parsed.protocol !== 'local-webview-benchmark:') return undefined;
     const origin = parsed.searchParams.get('origin');
     const runId = parsed.searchParams.get('runId');
     if (!origin || !runId || new URL(origin).protocol !== 'https:') return undefined;
+    const requestedRuntime = parsed.searchParams.get('runtime');
+    const runtime: BenchmarkRuntime =
+      requestedRuntime === 'native' || requestedRuntime === 'remote' ? requestedRuntime : 'bridge';
     return {
       origin: new URL(origin).origin,
       platform: parsed.searchParams.get('platform') || 'unknown',
       profile: parsed.searchParams.get('profile') || 'default',
       runId,
+      runtime,
       suite: parsed.searchParams.get('suite') === 'smoke' ? 'smoke' : 'full',
     };
   } catch {
@@ -131,6 +156,12 @@ function cacheName(runId: string, label: string): string {
   return `${runId}-${label}`.replaceAll(/[^a-zA-Z0-9._-]/g, '-');
 }
 
+function fixtureUrl(origin: string, pathname: string, runId: string): string {
+  const url = new URL(pathname, origin);
+  url.searchParams.set('__benchmarkRun', runId);
+  return url.href;
+}
+
 export function configurationFromBenchmarkUrl(url: string | null) {
   return url ? parseConfiguration(url) : undefined;
 }
@@ -174,16 +205,33 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
 
   const settleIfReady = useCallback(() => {
     const current = pending.current;
-    if (!current?.bundle || !current.page || current.bundleReadyMilliseconds === undefined) return;
+    if (!current?.page) return;
+    if (current.runtime === 'remote') {
+      if (current.navigationReadyMilliseconds === undefined) return;
+    } else if (!current.storedBundle || current.storageReadyMilliseconds === undefined) {
+      return;
+    }
     clearTimeout(current.timeout);
     pending.current = undefined;
-    current.resolve({
-      bridge: finishBridgeMetrics(current.bridge),
-      bundle: current.bundle,
-      bundleReadyMilliseconds: current.bundleReadyMilliseconds,
-      page: current.page,
-      totalMilliseconds: Date.now() - current.startedAt,
-    });
+    current.resolve(
+      current.runtime === 'remote'
+        ? {
+            bridge: finishBridgeMetrics(current.bridge),
+            navigationReadyMilliseconds: current.navigationReadyMilliseconds as number,
+            page: current.page,
+            pageReadyMilliseconds: current.pageReadyMilliseconds as number,
+            totalMilliseconds: Date.now() - current.startedAt,
+          }
+        : {
+            bridge: finishBridgeMetrics(current.bridge),
+            bundle: current.bundle,
+            page: current.page,
+            pageReadyMilliseconds: current.pageReadyMilliseconds as number,
+            storageReadyMilliseconds: current.storageReadyMilliseconds as number,
+            storedBundle: current.storedBundle as MirroredWebBundle,
+            totalMilliseconds: Date.now() - current.startedAt,
+          }
+    );
   }, []);
 
   const mount = useCallback(
@@ -194,23 +242,38 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
           return;
         }
         const startedAt = Date.now();
+        const timeoutMilliseconds =
+          configuration.runtime === 'remote' && next.expectedError
+            ? REMOTE_OFFLINE_OBSERVATION_MS
+            : MOUNT_TIMEOUT_MS;
         const timeout = setTimeout(() => {
           if (pending.current?.startedAt !== startedAt) return;
+          const current = pending.current;
           pending.current = undefined;
           setActive(undefined);
-          reject(new Error(`Timed out after ${MOUNT_TIMEOUT_MS}ms: ${next.label}`));
-        }, MOUNT_TIMEOUT_MS);
+          const error = new Error(`Timed out after ${timeoutMilliseconds}ms: ${next.label}`);
+          if (current.expectedError) {
+            current.resolve({
+              error: error.message,
+              expectedError: true,
+              totalMilliseconds: Date.now() - current.startedAt,
+            });
+          } else {
+            current.reject(error);
+          }
+        }, timeoutMilliseconds);
         pending.current = {
           bridge: { bytes: 0, calls: 0 },
           expectedError: next.expectedError,
           reject,
           resolve,
+          runtime: configuration.runtime,
           startedAt,
           timeout,
         };
         setActive({ ...next, id: ++mountSequence.current });
       }),
-    []
+    [configuration.runtime]
   );
 
   const unmount = useCallback(async () => {
@@ -219,7 +282,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
   }, []);
 
   const run = useCallback(async () => {
-    const { origin, platform, profile, runId, suite } = configuration;
+    const { origin, platform, profile, runId, runtime, suite } = configuration;
     const sizes = suite === 'smoke' ? [50] : [50, 200, 500];
     const resourceCounts = suite === 'smoke' ? [100] : [100, 500, 1000];
     const report = async (value: Record<string, unknown>) =>
@@ -227,6 +290,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
         platform,
         profile,
         runId,
+        runtime,
         suite,
         ...value,
       });
@@ -273,14 +337,20 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     for (const size of sizes) {
       const label = `unity-${size}MiB-etag`;
       const prefix = `/game/${size}/etag`;
-      const virtualUrl = `${origin}${prefix}/index.html`;
+      const virtualUrl = fixtureUrl(origin, `${prefix}/index.html`, runId);
       const cacheDirectory = scenarioCache(label);
       await removeCache(cacheDirectory);
       await execute({ cacheDirectory, label, phase: 'initial', virtualUrl });
       await execute({ cacheDirectory, label, phase: 'warm', virtualUrl });
       await postJson(origin, '/__control/offline', { offline: true, prefix });
       try {
-        await execute({ cacheDirectory, label, phase: 'offline', virtualUrl });
+        await execute({
+          cacheDirectory,
+          expectedError: runtime === 'remote',
+          label,
+          phase: 'offline',
+          virtualUrl,
+        });
       } finally {
         await postJson(origin, '/__control/offline', { offline: false, prefix });
       }
@@ -289,7 +359,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
 
     for (const count of resourceCounts) {
       const label = `resources-${count}`;
-      const virtualUrl = `${origin}/resources/${count}/index.html`;
+      const virtualUrl = fixtureUrl(origin, `/resources/${count}/index.html`, runId);
       const cacheDirectory = scenarioCache(label);
       await removeCache(cacheDirectory);
       await execute({ cacheDirectory, label, phase: 'initial', virtualUrl });
@@ -299,7 +369,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
 
     const noEtagSize = suite === 'smoke' ? 50 : 200;
     const noEtagLabel = `unity-${noEtagSize}MiB-no-etag`;
-    const noEtagUrl = `${origin}/game/${noEtagSize}/no-etag/index.html`;
+    const noEtagUrl = fixtureUrl(origin, `/game/${noEtagSize}/no-etag/index.html`, runId);
     const noEtagCache = scenarioCache(noEtagLabel);
     await removeCache(noEtagCache);
     await execute({
@@ -317,23 +387,37 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     await removeCache(noEtagCache);
 
     const edgeLabel = 'csp-cookie-range-worker';
-    const edgeUrl = `${origin}/edge/50/etag/index.html`;
+    const edgeUrl = fixtureUrl(origin, '/edge/50/etag/index.html', runId);
     const edgeCache = scenarioCache(edgeLabel);
     await removeCache(edgeCache);
-    await execute({
-      cacheDirectory: edgeCache,
-      expectedError: true,
-      label: edgeLabel,
-      phase: 'csp-rejected',
-      virtualUrl: edgeUrl,
-    });
-    await execute({
-      allowContentSecurityPolicyBypass: true,
-      cacheDirectory: edgeCache,
-      label: edgeLabel,
-      phase: 'csp-bypass',
-      virtualUrl: edgeUrl,
-    });
+    if (runtime !== 'remote') {
+      await execute({
+        cacheDirectory: edgeCache,
+        expectedError: true,
+        label: edgeLabel,
+        phase: 'csp-rejected',
+        virtualUrl: edgeUrl,
+      });
+      await resolveWebBundle({
+        allowContentSecurityPolicyBypass: true,
+        cacheAdapter,
+        cacheDirectory: edgeCache,
+        cachePolicy: {
+          maxBytes: 800 * MIB,
+          maxGenerations: 1,
+          maxInlineBytes: 4 * MIB,
+        },
+        trustedAssetOrigins: [],
+        virtualUrl: edgeUrl,
+      });
+      await execute({
+        allowContentSecurityPolicyBypass: true,
+        cacheDirectory: edgeCache,
+        label: edgeLabel,
+        phase: 'csp-bypass',
+        virtualUrl: edgeUrl,
+      });
+    }
     await removeCache(edgeCache);
 
     await postJson(origin, '/__control/complete', {
@@ -341,10 +425,27 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
       platform,
       profile,
       runId,
+      runtime,
       suite,
     });
     setStatus('Benchmark complete');
   }, [cacheAdapter, configuration, mount, unmount]);
+
+  const settleError = useCallback((error: Error) => {
+    const current = pending.current;
+    if (!current) return;
+    clearTimeout(current.timeout);
+    pending.current = undefined;
+    if (current.expectedError) {
+      current.resolve({
+        error: error.message,
+        expectedError: true,
+        totalMilliseconds: Date.now() - current.startedAt,
+      });
+    } else {
+      current.reject(error);
+    }
+  }, []);
 
   const started = useRef(false);
   useEffect(() => {
@@ -362,68 +463,126 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
         platform: configuration.platform,
         profile: configuration.profile,
         runId: configuration.runId,
+        runtime: configuration.runtime,
         suite: configuration.suite,
       }).catch(() => undefined);
     });
   }, [configuration, run]);
 
+  const handleBundleError = useCallback(
+    (error: Error) => {
+      settleError(error);
+    },
+    [settleError]
+  );
+
+  const handleRemoteError = useCallback(
+    ({ nativeEvent }: { nativeEvent: { description?: string } }) => {
+      settleError(new Error(nativeEvent.description || 'Remote WebView load failed'));
+    },
+    [settleError]
+  );
+
+  const handleRemoteLoadEnd = useCallback(() => {
+    const current = pending.current;
+    if (!current || current.runtime !== 'remote') return;
+    current.navigationReadyMilliseconds ??= Date.now() - current.startedAt;
+    settleIfReady();
+  }, [settleIfReady]);
+
+  const handleBundleReady = useCallback((bundle: MirroredWebBundle) => {
+    const current = pending.current;
+    if (!current) return;
+    current.bundle = bundle;
+  }, []);
+
+  const handleBundleStored = useCallback(
+    (bundle: MirroredWebBundle) => {
+      const current = pending.current;
+      if (!current) return;
+      current.storedBundle = bundle;
+      current.storageReadyMilliseconds = Date.now() - current.startedAt;
+      settleIfReady();
+    },
+    [settleIfReady]
+  );
+
+  const handleMessage = useCallback(
+    ({ nativeEvent }: { nativeEvent: { data: string } }) => {
+      let message: PageMessage;
+      try {
+        message = JSON.parse(nativeEvent.data) as PageMessage;
+      } catch {
+        return;
+      }
+      if (message.channel !== 'local-webview-benchmark:page') return;
+      const current = pending.current;
+      if (!current) return;
+      if (message.kind === 'error') {
+        if (current.expectedError && current.runtime !== 'remote') return;
+        settleError(new Error(message.message));
+        return;
+      }
+      current.page = message.metrics;
+      current.pageReadyMilliseconds ??= Date.now() - current.startedAt;
+      settleIfReady();
+    },
+    [settleError, settleIfReady]
+  );
+
   return (
     <View style={styles.container}>
       {active ? (
-        <LocalWebView
-          key={active.id}
-          cacheAdapter={cacheAdapter}
-          cacheDirectory={active.cacheDirectory}
-          cachePolicy={{
-            maxBytes: 800 * MIB,
-            maxGenerations: 1,
-            maxInlineBytes: 4 * MIB,
-          }}
-          allowContentSecurityPolicyBypass={active.allowContentSecurityPolicyBypass}
-          onBundleError={(error) => {
-            const current = pending.current;
-            if (!current) return;
-            clearTimeout(current.timeout);
-            pending.current = undefined;
-            if (current.expectedError) {
-              current.resolve({
-                error: error.message,
-                expectedError: true,
-                totalMilliseconds: Date.now() - current.startedAt,
-              });
-            } else {
-              current.reject(error);
-            }
-          }}
-          onBundleReady={(bundle) => {
-            const current = pending.current;
-            if (!current) return;
-            current.bundle = bundle;
-            current.bundleReadyMilliseconds = Date.now() - current.startedAt;
-            settleIfReady();
-          }}
-          onMessage={({ nativeEvent }) => {
-            let message: PageMessage;
-            try {
-              message = JSON.parse(nativeEvent.data) as PageMessage;
-            } catch {
-              return;
-            }
-            if (message.channel !== 'local-webview-benchmark:page') return;
-            const current = pending.current;
-            if (!current) return;
-            if (message.kind === 'error') {
-              clearTimeout(current.timeout);
-              pending.current = undefined;
-              current.reject(new Error(message.message));
-              return;
-            }
-            current.page = message.metrics;
-            settleIfReady();
-          }}
-          virtualUrl={active.virtualUrl}
-          style={styles.webView}
-        />
+        configuration.runtime === 'remote' ? (
+          <WebView
+            key={active.id}
+            cacheEnabled
+            domStorageEnabled
+            javaScriptEnabled
+            onError={handleRemoteError}
+            onLoadEnd={handleRemoteLoadEnd}
+            onMessage={handleMessage}
+            sharedCookiesEnabled
+            source={{ uri: active.virtualUrl }}
+            style={styles.webView}
+          />
+        ) : configuration.runtime === 'native' ? (
+          <NativeLocalWebView
+            key={active.id}
+            cacheAdapter={cacheAdapter}
+            cacheDirectory={active.cacheDirectory}
+            cachePolicy={{
+              maxBytes: 800 * MIB,
+              maxGenerations: 1,
+              maxInlineBytes: 4 * MIB,
+            }}
+            allowContentSecurityPolicyBypass={active.allowContentSecurityPolicyBypass}
+            onBundleError={handleBundleError}
+            onBundleReady={handleBundleReady}
+            onBundleStored={handleBundleStored}
+            onMessage={handleMessage}
+            virtualUrl={active.virtualUrl}
+            style={styles.webView}
+          />
+        ) : (
+          <LegacyLocalWebView
+            key={active.id}
+            cacheAdapter={cacheAdapter}
+            cacheDirectory={active.cacheDirectory}
+            cachePolicy={{
+              maxBytes: 800 * MIB,
+              maxGenerations: 1,
+              maxInlineBytes: 4 * MIB,
+            }}
+            allowContentSecurityPolicyBypass={active.allowContentSecurityPolicyBypass}
+            onBundleError={handleBundleError}
+            onBundleReady={handleBundleReady}
+            onBundleStored={handleBundleStored}
+            onMessage={handleMessage}
+            virtualUrl={active.virtualUrl}
+            style={styles.webView}
+          />
+        )
       ) : (
         <View style={styles.placeholder} />
       )}

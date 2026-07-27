@@ -64,6 +64,7 @@ export type MirroredLocalAsset = {
   mediaType: string;
   path: string;
   redirected: boolean;
+  responseHeaders?: Record<string, string>;
   responseUrl: string;
   sha256: string;
   size: number;
@@ -85,6 +86,15 @@ export type ResolveWebBundleOptions = {
   cacheDirectory?: string;
   cachePolicy?: CachePolicy;
   forceRefresh?: boolean;
+  /**
+   * Called after the durable cache has been validated, before any network
+   * revalidation or download starts. `undefined` means that no usable local
+   * generation exists yet.
+   *
+   * This lets a WebView show the remote HTTPS document immediately on first
+   * install while the mirror is populated in the background.
+   */
+  onCachedBundle?: (bundle: MirroredWebBundle | undefined) => Promise<void> | void;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
   /**
@@ -105,6 +115,7 @@ type RemoteAssetMetadata = {
   localFile?: string;
   mediaType: string;
   redirected: boolean;
+  responseHeaders?: Record<string, string>;
   responseUrl: string;
   sha256: string;
   size: number;
@@ -167,16 +178,27 @@ type PreparedBundle = {
   remoteAssets: LoadedResource[];
 };
 
-const CACHE_FORMAT_VERSION = 11;
+const CACHE_FORMAT_VERSION = 12;
 const CACHE_STATE_OVERHEAD_BYTES_PER_GENERATION = 256;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_GENERATIONS = 2;
 const DEFAULT_MAX_INLINE_BYTES = 32 * 1024 * 1024;
 const REVALIDATION_CONCURRENCY = 6;
 const MAX_REDIRECTS = 10;
+const RUNTIME_RESPONSE_HEADER_NAMES = new Set([
+  'access-control-allow-credentials',
+  'access-control-allow-origin',
+  'access-control-expose-headers',
+  'cross-origin-embedder-policy',
+  'cross-origin-resource-policy',
+  'etag',
+  'last-modified',
+  'timing-allow-origin',
+]);
 
 type ResolvedSecurityPolicy = {
   allowContentSecurityPolicyBypass: boolean;
+  entryOrigin: string;
   fingerprint: string;
   trustedOrigins: string[];
 };
@@ -423,6 +445,7 @@ function resolveSecurityPolicy({
   const trustedOrigins = [...origins].sort();
   return {
     allowContentSecurityPolicyBypass,
+    entryOrigin: entry.origin,
     fingerprint: sha256Text(
       JSON.stringify({
         allowContentSecurityPolicyBypass,
@@ -490,6 +513,45 @@ function header(headers: Record<string, string> | undefined, name: string): stri
   return entry?.[1]?.trim() || undefined;
 }
 
+function isSafeRuntimeHeaderValue(value: string): boolean {
+  return (
+    value.length > 0 && !value.includes('\u0000') && !value.includes('\r') && !value.includes('\n')
+  );
+}
+
+function runtimeResponseHeaders(
+  headers: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const selected: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalizedName = name.toLowerCase();
+    const normalizedValue = value.trim();
+    if (
+      RUNTIME_RESPONSE_HEADER_NAMES.has(normalizedName) &&
+      isSafeRuntimeHeaderValue(normalizedValue)
+    ) {
+      selected[normalizedName] = normalizedValue;
+    }
+  }
+  return Object.keys(selected).length > 0 ? selected : undefined;
+}
+
+function stringRecordsEqual(
+  left: Record<string, string> | undefined,
+  right: Record<string, string> | undefined
+): boolean {
+  const leftEntries = Object.entries(left ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(
+      ([name, value], index) =>
+        name === rightEntries[index]?.[0] && value === rightEntries[index]?.[1]
+    )
+  );
+}
+
 async function canonicalFileHashes(
   cacheAdapter: LocalWebViewCacheAdapter,
   path: string,
@@ -551,7 +613,12 @@ async function downloadWithoutRedirects(
     visited.add(currentUrl);
     const info = await cacheAdapter.download({
       followRedirect: false,
-      headers,
+      headers: {
+        ...headers,
+        ...(new URL(currentUrl).origin === policy.entryOrigin
+          ? {}
+          : { Origin: policy.entryOrigin }),
+      },
       maxBytes,
       overwrite: true,
       path: temporaryPath,
@@ -726,6 +793,7 @@ async function downloadResource(
         localPath: delivery === 'bridge' && preserveFile ? temporaryPath : undefined,
         mediaType,
         redirected: result.redirected,
+        responseHeaders: runtimeResponseHeaders(result.headers),
         responseUrl: result.finalUrl,
         sha256,
         size,
@@ -776,6 +844,7 @@ function metadataForAsset(asset: LoadedResource, localFile?: string): RemoteAsse
     redirected:
       asset.redirected ??
       canonicalResourceUrl(asset.responseUrl ?? asset.url) !== canonicalResourceUrl(asset.url),
+    responseHeaders: asset.responseHeaders,
     responseUrl: asset.responseUrl ?? asset.url,
     sha256: asset.sha256,
     size: asset.size,
@@ -872,7 +941,15 @@ function isRemoteAssetMetadata(value: unknown): value is RemoteAssetMetadata {
     (value.integrity.sha256 === undefined || typeof value.integrity.sha256 === 'string') &&
     (value.integrity.sha384 === undefined || typeof value.integrity.sha384 === 'string') &&
     (value.integrity.sha512 === undefined || typeof value.integrity.sha512 === 'string') &&
-    (value.localFile === undefined || value.localFile === `assets/${value.sha256}`)
+    (value.localFile === undefined || value.localFile === `assets/${value.sha256}`) &&
+    (value.responseHeaders === undefined ||
+      (isRecord(value.responseHeaders) &&
+        Object.entries(value.responseHeaders).every(
+          ([name, headerValue]) =>
+            RUNTIME_RESPONSE_HEADER_NAMES.has(name) &&
+            typeof headerValue === 'string' &&
+            isSafeRuntimeHeaderValue(headerValue)
+        )))
   );
 }
 
@@ -1043,6 +1120,7 @@ function localAssetsForGeneration(
             mediaType: asset.mediaType,
             path: `${cacheDirectory}/generations/${generationId}/${asset.localFile}`,
             redirected: asset.redirected,
+            responseHeaders: asset.responseHeaders,
             responseUrl: asset.responseUrl,
             sha256: asset.sha256,
             size: asset.size,
@@ -1776,6 +1854,7 @@ async function revalidateAssets(
       result.asset.declaredMediaType !== metadata.declaredMediaType ||
       result.asset.mediaType !== metadata.mediaType ||
       result.asset.redirected !== metadata.redirected ||
+      !stringRecordsEqual(result.asset.responseHeaders, metadata.responseHeaders) ||
       result.asset.responseUrl !== metadata.responseUrl ||
       result.asset.contentSecurityPolicy !== metadata.contentSecurityPolicy ||
       result.asset.contentSecurityPolicyReportOnly !== metadata.contentSecurityPolicyReportOnly
@@ -1989,6 +2068,7 @@ async function resolveWebBundleUnlocked({
   cacheDirectory = cacheDirectoryForOrigin(virtualUrl, cacheAdapter),
   cachePolicy,
   forceRefresh = false,
+  onCachedBundle,
   onProgress,
   signal,
   trustedAssetOrigins,
@@ -2037,15 +2117,18 @@ async function resolveWebBundleUnlocked({
   );
   throwIfAborted(signal);
 
-  let cached = forceRefresh
-    ? undefined
-    : await readCachedBundle(
-        cacheAdapter,
-        cacheDirectory,
-        generationPolicyFingerprint,
-        virtualUrl,
-        generationValidationCache
-      );
+  const availableCached =
+    forceRefresh && !onCachedBundle
+      ? undefined
+      : await readCachedBundle(
+          cacheAdapter,
+          cacheDirectory,
+          generationPolicyFingerprint,
+          virtualUrl,
+          generationValidationCache
+        );
+  await onCachedBundle?.(availableCached?.bundle);
+  let cached = forceRefresh ? undefined : availableCached;
   if (cached) {
     try {
       onProgress?.('Revalidating every remote asset with ETag and SHA-256…');

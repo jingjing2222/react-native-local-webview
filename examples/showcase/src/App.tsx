@@ -4,6 +4,7 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 import { createReactNativeBlobUtilCacheAdapter, LocalWebView } from 'react-native-local-webview';
 
 import BenchmarkApp, { configurationFromBenchmarkUrl } from './BenchmarkApp';
+import CompatibilityApp, { configurationFromCompatibilityUrl } from './CompatibilityApp';
 
 const ENTRY_URL = 'https://book.jingjing2222.com/';
 
@@ -18,6 +19,8 @@ export default function App({ benchmarkUrl: initialBenchmarkUrl }: { benchmarkUr
   }, [initialBenchmarkUrl]);
 
   if (benchmarkUrl === undefined) return null;
+  const compatibility = configurationFromCompatibilityUrl(benchmarkUrl);
+  if (compatibility) return <CompatibilityApp configuration={compatibility} />;
   const benchmark = configurationFromBenchmarkUrl(benchmarkUrl);
   if (benchmark) return <BenchmarkApp configuration={benchmark} />;
   return <Showcase />;

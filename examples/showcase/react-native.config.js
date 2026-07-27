@@ -9,10 +9,6 @@ module.exports = {
   dependencies: {
     'react-native-local-webview': {
       root: path.join(__dirname, '../../packages/react-native-local-webview'),
-      platforms: {
-        ios: null,
-        android: null,
-      },
     },
   },
 };

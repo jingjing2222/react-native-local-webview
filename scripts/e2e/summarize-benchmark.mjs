@@ -13,12 +13,16 @@ const memoryRows = memoryLines.map((line) =>
 );
 const peakRssKib = Math.max(0, ...memoryRows.map((row) => row.total_rss_kib ?? 0));
 const peakPssKib = Math.max(0, ...memoryRows.map((row) => row.total_pss_kib ?? 0));
+const peakHostRssKib = Math.max(0, ...memoryRows.map((row) => row.host_rss_kib ?? 0));
+const peakWebkitRssKib = Math.max(0, ...memoryRows.map((row) => row.webkit_rss_kib ?? 0));
 const scenarioStarts = result.reports.filter((report) => report.kind === 'scenario-start');
 const scenarioResults = result.reports.filter((report) => report.kind === 'scenario-result');
 const failures = [];
 const completion = result.reports.findLast((report) => report.kind === 'complete');
 const suite = completion?.suite === 'smoke' ? 'smoke' : 'full';
-const expectedScenarioCount = suite === 'smoke' ? 9 : 19;
+const runtime = completion?.runtime === 'remote' ? 'remote' : completion?.runtime || 'bridge';
+const isRemote = runtime === 'remote';
+const expectedScenarioCount = suite === 'smoke' ? (isRemote ? 7 : 9) : isRemote ? 17 : 19;
 
 if (completion?.error) failures.push(`The benchmark application failed: ${completion.error}`);
 if (scenarioResults.length !== expectedScenarioCount) {
@@ -49,8 +53,13 @@ for (const scenario of scenarioResults) {
     }
     continue;
   }
-  if (!value?.bundle || !value?.page) {
-    failures.push(`${scenario.label}/${scenario.phase} did not produce bundle and page metrics.`);
+  if (isRemote && scenario.phase === 'offline' && value?.expectedError) {
+    continue;
+  }
+  if (!value?.page || (!isRemote && !value.storedBundle)) {
+    failures.push(
+      `${scenario.label}/${scenario.phase} did not produce the required runtime and page metrics.`
+    );
     continue;
   }
   if (value.page.origin !== result.origin || value.page.secureContext !== true) {
@@ -58,14 +67,14 @@ for (const scenario of scenarioResults) {
   }
   if (scenario.phase === 'offline') {
     if (
-      value.bundle.usedCachedBundle !== true ||
-      !requests.some((request) => request.status === 0)
+      !isRemote &&
+      (value.bundle?.usedCachedBundle !== true || !requests.some((request) => request.status === 0))
     ) {
       failures.push(`${scenario.label}/offline did not fall back after an unreachable origin.`);
     }
   }
-  if (scenario.phase === 'warm-304') {
-    const expected = value.bundle.downloadedAssets.length;
+  if (!isRemote && scenario.phase === 'warm-304') {
+    const expected = value.storedBundle.downloadedAssets.length;
     const notModified = requests.filter((request) => request.status === 304).length;
     if (notModified !== expected) {
       failures.push(
@@ -73,7 +82,7 @@ for (const scenario of scenarioResults) {
       );
     }
   }
-  if (scenario.phase === 'warm-no-etag') {
+  if (!isRemote && scenario.phase === 'warm-no-etag') {
     if (!requests.some((request) => request.status === 200 || request.status === 206)) {
       failures.push(`${scenario.label}/warm-no-etag did not redownload ETag-less resources.`);
     }
@@ -115,15 +124,45 @@ for (const scenario of scenarioResults) {
 const rows = scenarioResults.map((scenario) => {
   const value = scenario.result ?? {};
   const requests = requestsFor(scenario);
+  const start = scenarioStarts.find(
+    (candidate) =>
+      candidate.label === scenario.label &&
+      candidate.phase === scenario.phase &&
+      candidate.receivedAt <= scenario.receivedAt
+  );
+  const startMilliseconds = start ? Date.parse(start.receivedAt) : Number.NaN;
+  const endMilliseconds = Date.parse(scenario.receivedAt);
+  const phasePeakRssKib = Math.max(
+    0,
+    ...memoryRows
+      .filter((row) => row.timestamp_ms >= startMilliseconds && row.timestamp_ms <= endMilliseconds)
+      .map((row) => row.total_rss_kib ?? 0)
+  );
+  const phaseMemoryRows = memoryRows.filter(
+    (row) => row.timestamp_ms >= startMilliseconds && row.timestamp_ms <= endMilliseconds
+  );
+  const phasePeakHostRssKib = Math.max(0, ...phaseMemoryRows.map((row) => row.host_rss_kib ?? 0));
+  const phasePeakWebkitRssKib = Math.max(
+    0,
+    ...phaseMemoryRows.map((row) => row.webkit_rss_kib ?? 0)
+  );
   return [
     scenario.label,
     scenario.phase,
-    value.bundleReadyMilliseconds?.toFixed?.(0) ?? '—',
+    value.pageReadyMilliseconds?.toFixed?.(0) ?? '—',
+    value.storageReadyMilliseconds?.toFixed?.(0) ?? '—',
     value.totalMilliseconds?.toFixed?.(0) ?? '—',
     value.bridge?.mebibytesPerSecond?.toFixed?.(2) ?? '—',
-    String(value.bundle?.usedCachedBundle ?? '—'),
+    String(value.bundle?.usedCachedBundle ?? false),
     String(requests.filter((request) => request.status === 304).length),
     String(requests.reduce((sum, request) => sum + (request.bytes || 0), 0)),
+    ...(peakHostRssKib > 0
+      ? [
+          phasePeakHostRssKib > 0 ? (phasePeakHostRssKib / 1024).toFixed(1) : '—',
+          phasePeakWebkitRssKib > 0 ? (phasePeakWebkitRssKib / 1024).toFixed(1) : '—',
+        ]
+      : []),
+    phasePeakRssKib > 0 ? (phasePeakRssKib / 1024).toFixed(1) : '—',
   ];
 });
 
@@ -131,12 +170,23 @@ const markdown = [
   `# Production benchmark: ${result.runId}`,
   '',
   `- Origin: \`${result.origin}\``,
+  `- Runtime: \`${runtime}\``,
   `- Peak RSS: ${(peakRssKib / 1024).toFixed(1)} MiB`,
+  ...(peakHostRssKib > 0
+    ? [
+        `- Peak app-host RSS: ${(peakHostRssKib / 1024).toFixed(1)} MiB`,
+        `- Peak WebKit RSS: ${(peakWebkitRssKib / 1024).toFixed(1)} MiB`,
+      ]
+    : []),
   ...(peakPssKib > 0 ? [`- Peak PSS: ${(peakPssKib / 1024).toFixed(1)} MiB`] : []),
   `- Verdict: ${failures.length === 0 ? 'PASS' : 'FAIL'}`,
   '',
-  '| Scenario | Phase | Bundle ready ms | Total ms | Bridge MiB/s | Cached | 304 | Network bytes |',
-  '| --- | --- | ---: | ---: | ---: | --- | ---: | ---: |',
+  peakHostRssKib > 0
+    ? '| Scenario | Phase | Page ready ms | Background storage ms | Total ms | Bridge MiB/s | Displayed local | 304 | Network bytes | Peak app MiB | Peak WebKit MiB | Peak combined MiB |'
+    : '| Scenario | Phase | Page ready ms | Background storage ms | Total ms | Bridge MiB/s | Displayed local | 304 | Network bytes | Peak RSS MiB |',
+  peakHostRssKib > 0
+    ? '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |'
+    : '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |',
   ...rows.map((row) => `| ${row.join(' | ')} |`),
   '',
   '## Validation',

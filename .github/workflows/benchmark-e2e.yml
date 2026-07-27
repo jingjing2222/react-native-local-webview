@@ -161,20 +161,20 @@ jobs:
             running \
             "Running Android and iOS benchmark matrices"
 
-      - name: Benchmark low-end Android emulator
+      - name: Compare direct and local runtimes on low-end Android
         id: benchmark_low_android
         continue-on-error: true
-        run: scripts/e2e/run-android-benchmark.sh low "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
+        run: scripts/e2e/run-comparison-benchmark.sh android-low "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
 
-      - name: Benchmark latest Android System WebView emulator
+      - name: Compare direct and local runtimes on latest Android System WebView
         id: benchmark_latest_android
         continue-on-error: true
-        run: scripts/e2e/run-android-benchmark.sh latest "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
+        run: scripts/e2e/run-comparison-benchmark.sh android-latest "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
 
-      - name: Benchmark iOS simulator
+      - name: Compare direct and local runtimes on iOS simulator
         id: benchmark_ios
         continue-on-error: true
-        run: scripts/e2e/run-ios-benchmark.sh "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
+        run: scripts/e2e/run-comparison-benchmark.sh ios "${{ inputs.suite }}" "$BENCHMARK_ORIGIN"
 
       - name: Assert benchmark verdicts
         if: always()
@@ -186,6 +186,32 @@ jobs:
           test "$LOW_ANDROID_OUTCOME" = success
           test "$LATEST_ANDROID_OUTCOME" = success
           test "$IOS_OUTCOME" = success
+
+      - name: Publish direct-vs-local comparison
+        if: always()
+        env:
+          COMMENT_ID: ${{ inputs.comment_id }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BY: ${{ inputs.requested_by }}
+        shell: bash
+        run: |
+          comparison="$(find e2e/artifacts -maxdepth 1 -name '*-comparison-*.md' -print -exec cat {} \;)"
+          if [ -n "$comparison" ]; then
+            printf '%s\n' "$comparison" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+            body="$(printf '@%s Production E2E benchmark comparison\n\n- Suite: %s\n- Revision: %s@%s\n- Run: %s\n\n%s\n' \
+              "$REQUESTED_BY" \
+              "${{ inputs.suite }}" \
+              "$TESTED_REPOSITORY" \
+              "$TESTED_SHA" \
+              "$RUN_URL" \
+              "${comparison:-No comparison report was produced.}")"
+            gh api -X PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
+              -f body="$body" \
+              >/dev/null || true
+          fi
 
       - name: Upload benchmark artifacts
         if: always()
@@ -219,7 +245,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - benchmark
-    if: always() && inputs.comment_id != ''
+    if: always() && inputs.comment_id != '' && needs.benchmark.result != 'success'
 
     steps:
       - name: Update final E2E result
