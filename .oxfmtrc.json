@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    ".yarn/**",
+    "example/android/**",
+    "example/ios/**",
+    "dist/**",
+    "node_modules/**",
+    "yarn.lock"
+  ],
+  "printWidth": 100,
+  "quoteProps": "consistent",
+  "singleQuote": true,
+  "trailingComma": "es5"
+}

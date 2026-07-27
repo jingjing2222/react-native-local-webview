@@ -1,127 +1,97 @@
 {
   "name": "react-native-local-webview",
-  "version": "0.1.0",
-  "description": "Serve local web bundles over localhost and render them with react-native-webview",
-  "main": "./lib/module/index.js",
-  "types": "./lib/typescript/src/index.d.ts",
-  "exports": {
-    ".": {
-      "react-native-local-webview-source": "./src/index.tsx",
-      "types": "./lib/typescript/src/index.d.ts",
-      "default": "./lib/module/index.js"
-    },
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "src",
-    "lib",
-    "android",
-    "ios",
-    "cpp",
-    "*.podspec",
-    "react-native.config.js",
-    "!ios/build",
-    "!android/build",
-    "!android/gradle",
-    "!android/gradlew",
-    "!android/gradlew.bat",
-    "!android/local.properties",
-    "!**/__tests__",
-    "!**/__fixtures__",
-    "!**/__mocks__",
-    "!**/.*"
-  ],
-  "scripts": {
-    "example": "yarn workspace react-native-local-webview-example",
-    "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
-    "prepare": "bob build",
-    "typecheck": "tsc",
-    "lint": "eslint \"**/*.{js,ts,tsx}\""
-  },
+  "version": "0.0.1-alpha.0",
+  "description": "Run CSR and Unity WebGL bundles from durable local storage without giving up their HTTPS origin.",
   "keywords": [
-    "react-native",
+    "android",
+    "cache",
+    "csr",
     "ios",
-    "android"
+    "offline",
+    "react-native",
+    "unity",
+    "wasm",
+    "webgl",
+    "webview"
   ],
+  "homepage": "https://github.com/jingjing2222/react-native-local-webview#readme",
+  "bugs": {
+    "url": "https://github.com/jingjing2222/react-native-local-webview/issues"
+  },
+  "license": "MIT",
+  "author": "jingjing2222 <hj.jingjing2222@gmail.com> (https://github.com/jingjing2222)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jingjing2222/react-native-local-webview.git"
   },
-  "author": "jingjing2222 <hj.jingjing2222@gmail.com> (https://github.com/jingjing2222)",
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/jingjing2222/react-native-local-webview/issues"
-  },
-  "homepage": "https://github.com/jingjing2222/react-native-local-webview#readme",
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
-  },
-  "devDependencies": {
-    "@eslint/compat": "^2.1.0",
-    "@eslint/eslintrc": "^3.3.5",
-    "@eslint/js": "^10.0.1",
-    "@react-native/babel-preset": "0.85.0",
-    "@react-native/eslint-config": "0.85.0",
-    "@types/react": "^19.2.0",
-    "del-cli": "^7.0.0",
-    "eslint": "^9.39.4",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-ft-flow": "^3.0.11",
-    "eslint-plugin-prettier": "^5.5.6",
-    "prettier": "^3.8.3",
-    "react": "19.2.3",
-    "react-native": "0.85.0",
-    "react-native-builder-bob": "^0.43.0",
-    "turbo": "^2.9.16",
-    "typescript": "^6.0.3"
-  },
-  "peerDependencies": {
-    "react": "*",
-    "react-native": "*"
-  },
   "workspaces": [
     "example"
   ],
-  "packageManager": "yarn@4.11.0",
-  "react-native-builder-bob": {
-    "source": "src",
-    "output": "lib",
-    "targets": [
-      [
-        "module",
-        {
-          "esm": true
-        }
-      ],
-      [
-        "typescript",
-        {
-          "project": "tsconfig.build.json"
-        }
-      ]
-    ]
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
   },
-  "codegenConfig": {
-    "name": "LocalWebviewSpec",
-    "type": "modules",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.localwebview"
-    }
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
   },
-  "prettier": {
-    "quoteProps": "consistent",
-    "singleQuote": true,
-    "tabWidth": 2,
-    "trailingComma": "es5",
-    "useTabs": false
+  "scripts": {
+    "example": "yarn workspace react-native-local-webview-example",
+    "clean": "del-cli example/android/build example/android/app/build example/ios/build dist",
+    "build": "tsdown",
+    "prepare": "yarn build",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --type-aware --deny-warnings --react-plugin --import-plugin --promise-plugin --vitest-plugin .",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "publint": "publint --strict",
+    "check": "yarn format:check && yarn lint && yarn typecheck && yarn test && yarn build && yarn publint"
   },
-  "create-react-native-library": {
-    "type": "turbo-module",
-    "languages": "kotlin-objc",
-    "tools": [
-      "eslint"
-    ],
-    "version": "0.63.0"
-  }
+  "dependencies": {
+    "@noble/hashes": "2.2.0",
+    "acorn": "8.17.0",
+    "acorn-walk": "8.3.5",
+    "base64-js": "1.5.1",
+    "css-tree": "3.2.1",
+    "eslint-scope": "9.1.2",
+    "magic-string": "1.1.0",
+    "parse5": "6.0.1",
+    "rollup": "2.80.0",
+    "srcset": "5.0.3"
+  },
+  "devDependencies": {
+    "@types/css-tree": "2.3.11",
+    "@types/parse5": "6.0.3",
+    "@types/react": "^19.2.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "create-vite": "9.1.1",
+    "del-cli": "^7.0.0",
+    "oxfmt": "0.60.0",
+    "oxlint": "1.75.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "publint": "0.3.22",
+    "react": "19.2.3",
+    "react-native": "0.85.0",
+    "react-native-webview": "13.16.0",
+    "react-test-renderer": "19.2.3",
+    "release-it": "21.0.0",
+    "tsdown": "0.22.14",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.10"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*",
+    "react-native-webview": "*"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "packageManager": "yarn@4.11.0"
 }
