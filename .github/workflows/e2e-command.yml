@@ -1,0 +1,96 @@
+name: E2E Command
+
+on:
+  issue_comment:
+    types:
+      - created
+      - edited
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  dispatch-e2e:
+    name: Dispatch E2E
+    runs-on: ubuntu-latest
+    if: >
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == 'jingjing2222' &&
+      (contains(github.event.comment.body, '/e2e') ||
+        contains(github.event.comment.body, '/E2E'))
+
+    steps:
+      - name: Validate command
+        id: command
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if printf '%s\n' "$COMMENT_BODY" | grep -Eiq '(^|[[:space:]])/e2e([[:space:]]|$)'; then
+            echo "matched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "matched=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read pull request
+        id: pr
+        if: steps.command.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<< "$pr_json")"
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "/e2e only runs same-repository pull requests on the self-hosted runner." >&2
+            exit 1
+          fi
+          {
+            echo "head_ref=$(jq -r '.head.ref' <<< "$pr_json")"
+            echo "head_repo=$head_repo"
+            echo "head_sha=$(jq -r '.head.sha' <<< "$pr_json")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create E2E progress comment
+        id: progress-comment
+        if: steps.command.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REQUESTED_BY: ${{ github.event.comment.user.login }}
+        run: |
+          body="$(printf '@%s Production E2E: queued\n\n- Suite: full\n- Detail: Waiting for the Mac mini runner\n- Revision: %s@%s\n- SHA: %s\n' \
+            "$REQUESTED_BY" \
+            "$HEAD_REPO" \
+            "$HEAD_REF" \
+            "$HEAD_SHA")"
+          comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="$body" \
+            --jq '.id')"
+          echo "id=$comment_id" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch E2E workflow
+        if: steps.command.outputs.matched == 'true'
+        env:
+          COMMENT_ID: ${{ steps.progress-comment.outputs.id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REQUESTED_BY: ${{ github.event.comment.user.login }}
+        run: |
+          gh workflow run benchmark-e2e.yml \
+            -R "$GITHUB_REPOSITORY" \
+            --ref "$DEFAULT_BRANCH" \
+            -f suite=full \
+            -f pr_number="$PR_NUMBER" \
+            -f pr_sha="$HEAD_SHA" \
+            -f pr_repository="$HEAD_REPO" \
+            -f comment_id="$COMMENT_ID" \
+            -f requested_by="$REQUESTED_BY"

@@ -1,21 +1,18 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: SemVer version to publish
-        required: true
-        default: 0.0.1
-        type: string
+  push:
+    branches:
+      - main
 
 concurrency:
-  group: release
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write
   id-token: write
+  pull-requests: write
 
 jobs:
   release:
@@ -41,13 +38,11 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
-      - name: Configure release author
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Release
-        run: yarn release-it "$RELEASE_VERSION" --ci
+      - name: Create release pull request or publish
+        id: changesets
+        uses: changesets/action@469993ce5783c6a38e72541d4ba0d25588702b9a # v1.9.0
+        with:
+          publish: yarn release
+          title: 'chore: version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_VERSION: ${{ inputs.version }}

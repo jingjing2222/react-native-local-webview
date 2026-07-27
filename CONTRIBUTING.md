@@ -13,11 +13,12 @@ mise install
 mise exec -- corepack yarn install --immutable
 ```
 
-The root workspace contains the TypeScript library. `example/` contains the
-React Native application and consumes the local package through the workspace.
-The library has no native project of its own. WebView is a peer dependency;
-filesystem and downloader behavior comes from a cache adapter. The example
-uses the included `createReactNativeBlobUtilCacheAdapter` preset.
+`packages/react-native-local-webview/` contains the publishable TypeScript
+library. `examples/showcase/` contains the React Native application, and
+`e2e/` contains the production benchmark infrastructure. The library has no
+native project of its own. WebView is a peer dependency; filesystem and
+downloader behavior comes from a cache adapter. The showcase uses the included
+`createReactNativeBlobUtilCacheAdapter` preset.
 
 ## Checks
 
@@ -49,16 +50,16 @@ The unit suite verifies every static CSR template name shipped by the pinned
 `create-vite` test catalog. It tests the resulting entry HTML and generic
 resource graph; Vite is not part of the public package API.
 
-## Example app
+## Showcase app
 
 ```sh
-yarn example start
-yarn example ios
+yarn showcase start
+yarn showcase ios
 # or
-yarn example android
+yarn showcase android
 ```
 
-Re-run CocoaPods or Gradle setup only when changing the example's installed
+Re-run CocoaPods or Gradle setup only when changing the showcase's installed
 native dependencies.
 
 ## Pull requests
