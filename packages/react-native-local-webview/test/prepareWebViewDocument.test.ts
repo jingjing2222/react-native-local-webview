@@ -2,7 +2,10 @@ import { parse, type Node } from 'parse5';
 import { describe, expect, it } from 'vitest';
 
 import { ContentSecurityPolicyError } from '../src/resourceGraph';
-import { prepareWebViewDocument } from '../src/prepareWebViewDocument';
+import {
+  prepareNativeWebViewDocument,
+  prepareWebViewDocument,
+} from '../src/prepareWebViewDocument';
 
 type HtmlNode = Node;
 
@@ -91,5 +94,32 @@ describe('prepareWebViewDocument', () => {
     expect(result).toContain('data-case="empty"');
     expect(result).toContain('data-case="body"');
     expect(() => prepareWebViewDocument(html, {})).not.toThrow();
+  });
+});
+
+describe('prepareNativeWebViewDocument', () => {
+  it('does not install JS transport or History API shims', () => {
+    const html = '<!doctype html><html><head></head><body>native</body></html>';
+    expect(prepareNativeWebViewDocument(html)).toBe(html);
+  });
+
+  it('applies the same explicit meta CSP bypass policy', () => {
+    const html =
+      '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src none"></head><body></body></html>';
+    expect(() => prepareNativeWebViewDocument(html)).toThrow(ContentSecurityPolicyError);
+    expect(prepareNativeWebViewDocument(html, true)).not.toContain('Content-Security-Policy');
+  });
+
+  it('places a native document-start script before page scripts', () => {
+    const prepared = prepareNativeWebViewDocument(
+      '<!doctype html><html><head><script>globalThis.order = ["page"]</script></head></html>',
+      false,
+      'globalThis.order = ["native"]'
+    );
+
+    expect(prepared.indexOf('globalThis.order = ["native"]')).toBeLessThan(
+      prepared.indexOf('globalThis.order = ["page"]')
+    );
+    expect(prepared).toContain('data-local-webview-native-bootstrap');
   });
 });

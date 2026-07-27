@@ -1,98 +1,99 @@
 # react-native-local-webview
 
 [![CI](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml/badge.svg)](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Node 24.15.0](https://img.shields.io/badge/node-24.15.0-339933.svg)](../../mise.toml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 > Run CSR and Unity WebGL bundles from durable local storage without giving up
 > their HTTPS origin.
 
-`react-native-local-webview` mirrors a site's statically discoverable resource
-graph into persistent application storage, then runs the mirrored bundle
-through `react-native-webview` as its original HTTPS site. The files are local;
-`location.origin`, same-origin URLs, CORS behavior, and browser history still
-belong to the public origin.
+`LocalWebView` mirrors a web application's statically discoverable startup
+graph into app-owned storage and runs it in a native WebView at the original
+HTTPS URLs. A cache miss does not show an installer or blank loading screen: it
+opens the remote HTTPS page immediately, waits for its document load event (or
+a bounded fallback), and saves the mirror in the background. That document
+keeps running unchanged, and the next mount uses the verified local generation.
 
-```tsx
-<LocalWebView cacheAdapter={cacheAdapter} virtualUrl="https://book.jingjing2222.com/" />
-```
+It is a Nitro Hybrid View, not a wrapper around the
+`react-native-webview` component. `react-native-webview@13.16.0` remains a peer
+and the public compatibility contract for props, events, source objects, and
+imperative methods.
 
-## Why this exists
+## Why
 
-The two obvious approaches each give up something important:
+`file://` makes storage durable but changes the security origin. Depending only
+on WebKit or Chromium cache keeps the origin but gives the app no durability
+guarantee.
 
-- Leaving everything to WebKit or Chromium keeps normal web semantics, but its
-  cache can be evicted independently of the application.
-- Loading a downloaded site with `file://` makes storage explicit, but changes
-  the origin and complicates CORS, routing, workers, WASM, and runtime fetches.
-
-This package separates storage from the browsing context:
+This package separates the two:
 
 ```text
-remote HTTPS site ── mirror + revalidate ──▶ durable app storage
-        │                                      │
-        └── HTTPS origin ──▶ WebView ◀── local bundle
+first mount ──▶ remote HTTPS page ──▶ visible immediately
+        └────▶ discover + verify ──▶ app storage
+
+later mount ──▶ verified local graph at the original HTTPS URLs
+                                            │
+                                GET/HEAD ───┴── local
+                                unknown/mutating ── network
 ```
 
-After the first successful mirror, the page shell and its discovered static
-dependencies can start from local files. URLs absent from the local inventory
-continue through normal WebView networking, so runtime API requests and
-statically unknowable assets are not forced into an offline-only model.
+The trade-off is deliberate. This runtime is most useful when a large game must
+survive cache eviction or launch fully offline. It is not automatically faster
+than a cache-hot WebView: a measured iOS simulator run made a 500 MiB warm graph
+17% faster and eliminated its 500 MiB network transfer, while a 50 MiB
+cache-hot graph was about 3.7 times slower through local protocol streaming.
+The first install also uses roughly twice the network traffic because the
+visible remote page and its background durable mirror download independently.
+See the [benchmark methodology and snapshot](../../e2e/README.md).
 
-## What stays intact
+The document still sees:
 
-- The configured HTTPS `location.origin`, instead of `file://`.
-- WebView session history for CSR routing and native back navigation.
-- Normal network and CORS behavior for URLs that are not locally mirrored.
-- Standard `react-native-webview` props and imperative methods.
-
-## What becomes durable
-
-- The discovered HTML, JavaScript, CSS, image, worker, WASM, and WebGL resource
-  graph.
-- Per-resource ETag and SHA-256 revalidation, including assets whose URLs did
-  not change.
-- Atomic cache generations, bounded retention, and rollback to a retained
-  verified generation.
-- Local streaming for large `.data` and `.wasm` files used by WebGL builds.
-
-The primary target is a CSR application or Unity WebGL game whose startup files
-must survive WebView cache eviction without pretending that the whole web
-runtime is a filesystem.
-
-`react-native-local-webview` is a TypeScript package. It ships no iOS or Android
-native module, and it has no filesystem package in either `dependencies` or
-`peerDependencies`. Your application supplies one provider-neutral
-`LocalWebViewCacheAdapter`.
+```js
+location.origin; // https://game.example.com
+history.pushState({}, '', '/play');
+fetch('/api/session'); // normal HTTPS request unless this exact GET is cached
+```
 
 ## Installation
 
 ```sh
-yarn add react-native-local-webview react-native-webview@13.16.0
+yarn add react-native-local-webview react-native-nitro-modules react-native-webview
+cd ios && pod install
 ```
 
-The peer ranges for React, React Native, and React Native WebView are `*`, so
-the host application owns version selection. Development and the example app
-pin `react-native-webview@13.16.0`.
-
-## Quick start
-
-The ready-to-run preset uses `react-native-blob-util`. It is installed by the
-application, not by this package:
+Install one filesystem implementation in the host app. It is intentionally not
+a dependency or peer dependency of this package:
 
 ```sh
 yarn add react-native-blob-util
 ```
 
-Create the cache adapter next to the `LocalWebView` that receives it. Memoizing
-keeps the cache adapter identity stable across renders:
+The peer ranges for React, React Native, Nitro Modules, and React Native WebView
+are `*`. This repository develops and tests against:
+
+- React Native WebView 13.16.0;
+- React Native 0.85.0;
+- React Native Nitro Modules 0.36.1;
+- iOS 16.4 or newer; and
+- Android API 24 or newer.
+
+Windows is not implemented.
+
+If pages request geolocation, camera, or microphone access on Android, declare
+the corresponding `ACCESS_FINE_LOCATION`, `CAMERA`, or `RECORD_AUDIO`
+permission in the host manifest. The runtime requests declared dangerous
+permissions when WebView asks for them. Storage permission for downloads on
+Android 9 and older is contributed by this package and requested on demand.
+
+## Quick start
+
+Keep adapter construction next to the component that receives it:
 
 ```tsx
 import { useMemo } from 'react';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { createReactNativeBlobUtilCacheAdapter, LocalWebView } from 'react-native-local-webview';
 
-export function BookApp() {
+export function UnityGame() {
   const cacheAdapter = useMemo(
     () => createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil),
     []
@@ -103,15 +104,21 @@ export function BookApp() {
       cacheAdapter={cacheAdapter}
       virtualUrl="https://book.jingjing2222.com/"
       cachePolicy={{
-        maxBytes: 512 * 1024 * 1024,
-        maxGenerations: 2,
+        // Keep this above the complete compressed Unity graph, not only .data.
+        maxBytes: 800 * 1024 * 1024,
+        maxGenerations: 1,
         maxInlineBytes: 32 * 1024 * 1024,
       }}
       onBundleReady={(bundle) => {
-        console.log(
-          bundle.usedCachedBundle ? 'local generation' : 'new generation',
-          bundle.generationId
-        );
+        // Called only when this mount is displaying a local generation.
+        console.log(bundle.generationId, bundle.usedCachedBundle);
+      }}
+      onBundleStored={(bundle) => {
+        // First-install download or background revalidation has completed.
+        console.log('durable for the next mount', bundle.generationId);
+      }}
+      onMessage={({ nativeEvent }) => {
+        console.log(nativeEvent.data);
       }}
       style={{ flex: 1 }}
     />
@@ -119,413 +126,297 @@ export function BookApp() {
 }
 ```
 
-The repository example uses exactly that co-located setup and can mirror
-`book.jingjing2222.com` without editing a placeholder.
-
-The preset sends a bounded HTTP Range request for each download. A server must
-either honor that Range or return a valid `Content-Length`; an unbounded
-length-unknown response is rejected. Pass `download` to the preset to replace
-that policy for infrastructure with a different trusted downloader.
-
-### Why a cache adapter is required
-
-React Native does not provide a standard JavaScript API for durable arbitrary
-files, atomic moves, partial file reads, or download-to-file. Those operations
-are required to commit complete cache generations and stream large WebGL assets
-without loading an entire file into JavaScript memory.
-
-Keeping the bundle only in the WebView's Cache Storage or IndexedDB would also
-put it back under WebKit/Chromium storage quotas and eviction. It would not be
-available until the WebView had started, either. The cache adapter therefore
-puts durability under the host application's control.
-
-No filesystem package is a dependency or peer dependency of
-`react-native-local-webview`. Presets receive the already imported module from
-the application:
+Choose one of the supplied factories:
 
 ```ts
-import RNFS from 'react-native-fs';
-import { Dirs, FileSystem } from 'react-native-file-access';
-import * as ExpoFileSystem from 'expo-file-system';
-import {
-  createExpoFileSystemCacheAdapter,
-  createReactNativeFileAccessCacheAdapter,
-  createReactNativeFsCacheAdapter,
-} from 'react-native-local-webview';
-
-const withExpo = createExpoFileSystemCacheAdapter(ExpoFileSystem, {
-  download: appDownloader.downloadToFile,
-});
-
-const withRnfs = createReactNativeFsCacheAdapter(RNFS, {
-  download: appDownloader.downloadToFile,
-});
-
-const withFileAccess = createReactNativeFileAccessCacheAdapter(
-  { Dirs, FileSystem },
-  { download: appDownloader.downloadToFile }
-);
+createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil);
+createReactNativeFsCacheAdapter(RNFS, options);
+createReactNativeFileAccessCacheAdapter({ Dirs, FileSystem }, options);
+createExpoFileSystemCacheAdapter(ExpoFileSystem, options);
 ```
 
-The `expo-file-system`, `react-native-fs`, and `react-native-file-access`
-presets require the application's downloader because those libraries'
-built-in downloaders follow redirects. The core must inspect each redirect
-before requesting it.
+Or implement `LocalWebViewCacheAdapter` with
+`createLocalWebViewCacheAdapter`. The contract includes durable directories,
+atomic same-volume moves, hashing, end-exclusive range reads, and abortable
+download-to-file.
 
-The Blob Util preset's default range reader uses native `slice`, reads the
-slice, and deletes its temporary file. That is a convenient CSR default, but
-large Unity `.data` files should pass a direct positional `readFileRange`
-implementation or use the React Native FS/File Access preset to avoid extra
-temporary-file I/O while streaming.
+The React Native FS, File Access, and Expo presets require an app-supplied
+downloader because their built-in download APIs follow redirects before the
+library can validate every hop. The Blob Util preset includes a bounded
+same-origin downloader.
 
-For an in-house provider, use `createLocalWebViewCacheAdapter`. It supplies
-whole-file reads, small state-file copies, and incremental SHA-256/384/512
-hashing when the host does not provide optimized implementations.
+## Runtime architecture
 
-The resulting `LocalWebViewCacheAdapter` contract covers:
+Bundle preparation and cache policy are orchestrated in TypeScript. The chosen
+filesystem adapter owns the physical download, file, and hash operations.
 
-- persistent Documents storage;
-- recursive directory creation and removal;
-- whole-file reads and writes, atomic same-volume moves, and file copies;
-- SHA-256, SHA-384, and SHA-512 file hashing, preferably through native or
-  single-pass I/O;
-- end-exclusive byte-range reads for bounded streaming, preferably through
-  direct positional I/O; and
-- abortable, no-auto-follow HTTPS downloads to a file.
+After a generation is verified, one Nitro view update sends:
 
-The generic factory cannot safely implement `readFileRange` or `download` with
-ordinary React Native `fetch`: doing so would buffer large Unity files in
-JavaScript and would not guarantee redirect or byte-limit enforcement. Those
-two operations must remain backed by host capabilities.
+- the prepared entry HTML;
+- a compact JSON inventory of canonical HTTPS URL, local path, media type,
+  byte size, and the validated runtime response-header subset; and
+- WebView configuration derived from React Native WebView props.
 
-`LocalWebView` accepts the usual `react-native-webview` props except `source`.
-Bundle preparation owns the loading and error states, so their render callbacks
-receive a status string or an `Error`:
+No asset bytes are sent through a React Native event or message:
+
+- Android answers `WebViewClient.shouldInterceptRequest` with a
+  `WebResourceResponse` backed by `FileInputStream`.
+- iOS answers the registered HTTPS `NSURLProtocol` from `FileHandle`.
+- `Range` and `HEAD` are handled natively.
+- Trusted cross-origin assets retain the CORS/CORP, validator, and timing
+  headers required for the browser to accept the synthesized local response;
+  mirror requests carry the entry origin, while state-changing headers such as
+  `Set-Cookie` are never replayed.
+- Android leaves unknown URLs and methods other than GET/HEAD on WebView's
+  ordinary network path.
+- iOS forwards those requests from `NSURLProtocol` through an ephemeral
+  `URLSession`. WebKit omits same-origin asynchronous fetch/XHR upload bodies
+  after private HTTPS scheme registration, so a document-start script streams
+  those bodies to a native temporary file before dispatch. This communication
+  stays between WebKit and native code; it does not cross the React Native
+  bridge. Cross-origin requests are not decorated with the internal body token,
+  preserving their normal CORS preflight behavior.
+- WebView events use a single Nitro JSI callback and are reconstructed as
+  React Native-compatible synthetic events in JavaScript.
+
+History remains WebView session history. iOS installs the same document-start
+History API notification pattern used by React Native WebView; Android uses
+`doUpdateVisitedHistory`. `goBack` and `goForward` operate on the native
+back/forward list.
+
+## Source modes
+
+Use exactly one of `virtualUrl` or `source`.
 
 ```tsx
+// Mirror and run a remote HTTPS graph.
+<LocalWebView cacheAdapter={cacheAdapter} virtualUrl="https://game.example.com/" />
+
+// The equivalent React Native WebView source form.
 <LocalWebView
   cacheAdapter={cacheAdapter}
-  virtualUrl="https://app.example.com/"
-  renderLoading={(status) => <LoadingScreen label={status} />}
-  renderError={(error) => <FailureScreen error={error} />}
+  source={{ uri: 'https://game.example.com/' }}
+/>
+
+// Ordinary static HTML.
+<LocalWebView
+  cacheAdapter={cacheAdapter}
+  source={{
+    baseUrl: 'https://game.example.com/',
+    html: '<!doctype html><title>Embedded</title>',
+  }}
 />
 ```
 
-## How the origin stays real
+An HTTPS GET `source.uri` without custom headers or body is mirrored. Requests
+with headers/body, non-GET requests, non-HTTPS URLs, and file URLs are loaded
+as direct React Native WebView-compatible sources.
 
-The cache is not exposed to the WebView as a `file://` URL.
+## React Native WebView compatibility
 
-```text
-HTTPS entry + static graph
-          │
-          ▼
-  parse, hash, and verify the discovered inventory
-          │
-          ├── index.html (small assets localized)
-          └── assets/<sha256> (large runtime files)
-                         │
-                         ▼
-WebView source={{ html, baseUrl: "https://app.example.com/" }}
-                         │
-                         └── fetch/XHR bridge streams verified local files
+`LocalWebViewProps` extends the applicable iOS and Android
+`WebViewProps` surface from React Native WebView 13.16.0. This includes source
+objects, loading/error renderers, navigation policies, JavaScript injection,
+user agents, cookies, media, scrolling, downloads, permissions, and
+platform-specific settings.
+
+Events:
+
+- `onLoadStart`, `onLoad`, `onLoadEnd`, `onLoadProgress`;
+- `onError`, `onHttpError`, and Android `onLoadSubResourceError`;
+- `onNavigationStateChange` and `onShouldStartLoadWithRequest`;
+- `onMessage`, `onScroll`, and `onOpenWindow`;
+- iOS `onContentProcessDidTerminate`, `onFileDownload`, and
+  `onCustomMenuSelection`;
+- Android `onContentSizeChange` and `onRenderProcessGone`.
+
+The forwarded ref exposes the same ten methods:
+
+```ts
+type LocalWebViewHandle = {
+  clearCache(includeDiskFiles: boolean): void;
+  clearFormData(): void;
+  clearHistory(): void;
+  goBack(): void;
+  goForward(): void;
+  injectJavaScript(script: string): void;
+  postMessage(message: string): void;
+  reload(): void;
+  requestFocus(): void;
+  stopLoading(): void;
+};
 ```
 
-The localized HTML uses data URLs, inline CSS, an import map, and a local stream
-bridge. Native file paths are never exposed to page code. The WebView receives
-`source={{ html, baseUrl }}`, where `baseUrl` is the final validated,
-same-origin entry response URL. Entry redirects may change the path used to
-resolve relative references, but they cannot change the configured origin.
-Consequently:
+`LocalWebView.isFileUploadSupported()` is also available.
 
-```js
-location.origin; // "https://app.example.com"
-fetch('/api/me'); // live request to https://app.example.com/api/me
-```
+For compatibility with the 0.0.1 package API, the handle additionally exposes
+`getHistoryState()` and `rollback()`. History observations are available through
+`onHistoryChange`, while `onCacheRollback` receives the generation selected by
+a successful manual rollback.
 
-Only URLs in the verified local inventory are intercepted. API requests, user
-content loaded at runtime, and every unknown URL continue to use normal WebView
-networking and CORS rules.
+`nativeConfig.props` is merged into native configuration. Supplying
+`nativeConfig.component` replaces the native host by definition, so that
+explicit escape hatch selects the bundled `LegacyLocalWebView`/React Native
+WebView path. All ordinary usage stays on Nitro and does not instantiate the
+React Native WebView component.
 
-Native mirroring is same-origin by default. If the static graph uses an owned
-CDN, opt that exact HTTPS origin in:
+The package exports `LegacyLocalWebView` directly for applications that need
+the earlier JavaScript asset-stream bridge.
 
-```tsx
-<LocalWebView
-  cacheAdapter={cacheAdapter}
-  virtualUrl="https://app.example.com/"
-  trustedAssetOrigins={['https://static.example-cdn.com']}
-/>
-```
+## Package-specific props
 
-Cross-origin references that are not trusted stay in the document and use the
-WebView's normal network and CORS path. Trusted origins and every redirect are
-checked before the native request is made.
+| Prop                               | Purpose                                                               |
+| ---------------------------------- | --------------------------------------------------------------------- |
+| `cacheAdapter`                     | Host-owned durable file/download/hash implementation                  |
+| `virtualUrl`                       | HTTPS entry URL to mirror; mutually exclusive with `source`           |
+| `trustedAssetOrigins`              | Additional exact HTTPS origins allowed during static discovery        |
+| `allowContentSecurityPolicyBypass` | Explicitly discard incompatible CSP declarations; defaults to `false` |
+| `cacheDirectory`                   | Override the origin-specific durable directory                        |
+| `cachePolicy`                      | Set byte, generation, and inline-resource limits                      |
+| `forceRefresh`                     | Force a background rebuild while any verified current view stays live |
+| `onBundleReady`                    | Observe a verified local generation displayed by this mount           |
+| `onBundleStored`                   | Observe background installation or revalidation completion            |
+| `onBundleError`                    | Observe mirror, validation, or native runtime preparation failures    |
+| `onHistoryChange`                  | Observe native URL/back-forward history changes                       |
+| `onCacheRollback`                  | Observe a generation selected by `rollback()`                         |
+| `sourcePath`                       | Use an existing local entry file together with `virtualUrl`           |
 
-## What is mirrored
+## Discovery and Unity WebGL
 
-HTML is parsed and serialized with an HTML5 parser; it is never split with an
-HTML regular expression. The resource graph includes:
+HTML is parsed with an HTML5 parser, not a regular expression. The graph
+recognizes:
 
-| Source     | Localized references                                                                                                                           |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTML       | scripts, stylesheets, icons, manifests, preloads, images, media, objects, `srcset`, inline styles                                              |
-| JavaScript | static imports, re-exports, literal `import()`, module and classic workers, `importScripts`, `new URL(...)`, and URL-bearing asset expressions |
-| CSS        | recursive `@import` and `url(...)` dependencies                                                                                                |
+- scripts, stylesheets, preload links, images, media, manifests, objects, and
+  `srcset`;
+- recursive CSS `@import` and `url(...)`;
+- static imports, re-exports, literal dynamic imports, workers,
+  `importScripts`, and URL-bearing `new URL(...)`;
+- literal fetch/XHR URLs and common Unity configuration fields;
+- WASM, `.data`, `.framework.js`, `.unityweb`, symbols, and streaming assets.
 
-The test suite includes representative `index.html` fixtures for all 16 static
-CSR template families in the pinned `create-vite` catalog, plus deliberately
-unusual valid HTML, dynamic chunks, workers, WASM, CSS graphs, and `srcset`.
-There is no Vite integration or Vite-specific public API; the templates are
-fixtures for the generic localization mechanism.
-
-Subresource Integrity is checked against the downloaded bytes before a script
-is transformed. For a statically discoverable programmatic `<script>`, the
-runtime materializer validates the element's strongest SRI digest against the
-original bytes and only then removes `integrity` before assigning the local
-Blob URL.
-
-## Unity WebGL and other large WebGL bundles
-
-Unity WebGL uses ordinary browser primitives, so it does not need a
-vendor-specific cache adapter. A conventional output works through the same
-generic pipeline:
+Small resources can be materialized into the prepared document. Large files
+remain in the active generation and are served by the native range path. A
+normal Unity WebGL output therefore uses the same mechanism:
 
 ```text
 index.html
 Build/game.loader.js
-Build/game.data[.gz|.br|.unityweb]
-Build/game.framework.js[.gz|.br|.unityweb]
-Build/game.wasm[.gz|.br|.unityweb]
+Build/game.framework.js[.br|.gz|.unityweb]
+Build/game.data[.br|.gz|.unityweb]
+Build/game.wasm[.br|.gz|.unityweb]
 StreamingAssets/...
 ```
 
-- The loader and page shell are localized during bundle preparation.
-- `.data`, `.wasm`, memory, and symbols files stay as verified files in the
-  active cache generation and are streamed through the local bridge.
-- A discovered executable `.framework.js` file (including an HTTP-decoded
-  `.br`/`.gz` response) is embedded as a local data URL for a dynamically
-  created `<script>`.
-- `.framework.js.unityweb` remains a verified bridge URL, allowing Unity's
-  decompression-fallback loader to fetch and decode it before execution.
-- Standard `fetch` and asynchronous `XMLHttpRequest` requests for inventory
-  URLs receive streamed local `Response` bodies.
-- Uncompressed or HTTP-decoded WASM keeps `application/wasm`, so
-  `WebAssembly.instantiateStreaming(fetch(url), imports)` remains usable.
-- Decompression-fallback `.unityweb` responses keep
-  `application/octet-stream` until the Unity loader decodes them.
-- Module workers, classic/shared workers with recursive `importScripts`,
-  literal dynamic imports, and literal `new URL(..., import.meta.url)`
-  references use the same graph.
-- A localized `SharedWorker` is shared only among callers that reuse its
-  materialized URL inside one WebView document. Separate WebView documents
-  create separate Blob URLs, so cross-document SharedWorker identity is not
-  preserved by this JavaScript-only mechanism.
-- Module-worker graphs may contain static, self, or literal dynamic-import
-  cycles. The browser build of Rollup 2.80.0 is a runtime dependency and is
-  invoked only for a reachable cyclic graph; it emits one local ESM entry while
-  preserving ESM live bindings, evaluation order, dynamic-import identity, and
-  top-level `await`. Metro may still package Rollup in the initial application
-  bundle.
-- Requests absent from the local inventory fall through to the network. This
-  includes normal runtime APIs.
+Runtime-computed URLs that cannot be proven statically fall through to the
+network. Assets that must work fully offline need a discoverable reference or
+an application-defined catalog represented in the startup graph.
 
-The crawler statically evaluates immutable strings only in concrete
-URL-bearing contexts such as imports, fetches, workers, `new URL(...)`, direct
-`.src`/`.href` sinks, and recognized WebGL configuration fields such as
-`codeUrl`, `dataUrl`, `frameworkUrl`, `loaderUrl`, `memoryUrl`, `symbolsUrl`,
-and `streamingAssetsUrl`. Arbitrary suffix-matching application fields such as
-`avatarUrl` and display strings such as `"report.json"` are left untouched.
-This includes the standard Unity template fields and expressions such as
-`buildUrl + "/game.wasm"`.
-Runtime-computed paths under `StreamingAssets`, Addressables, asset bundles, or
-application-defined download catalogs cannot always be inferred from source.
-Those requests use the WebView's normal network path. Files that must be
-available offline need a statically discoverable reference in the HTML,
-JavaScript, CSS, or WebGL configuration consumed during localization.
+The native response supports one byte range per request. Multithreaded Unity
+builds still require `SharedArrayBuffer` and cross-origin isolation support
+from the target WebView and server policy; this package does not synthesize
+COOP/COEP.
 
-For deterministic offline behavior, use Unity's decompression fallback output
-(`.unityweb`) or serve identity bytes. A native response that still carries
-`Content-Encoding: br` or `gzip` is rejected instead of being mislabeled and
-fed to `WebAssembly`. When the platform HTTP stack has already decoded a
-response and removed that header, the decoded representation is cached and
-hashed.
+## Revalidation and integrity
 
-Multithreaded WebGL builds additionally depend on the host WebView providing
-`SharedArrayBuffer` and cross-origin isolation. Those are platform response
-header capabilities and cannot be created by this JavaScript-only package.
-Use a non-threaded build unless the target WebViews independently satisfy those
-requirements.
-
-## Refresh, generations, and rollback
-
-Every fetched resource records its URL, media type, byte size, ETag,
-security-relevant response metadata, and SHA-256 digest. Redirects are followed
-manually, with HTTPS and trusted-origin validation at every hop.
+Each cached resource records its canonical URL, response URL, media type, byte
+size, ETag, and SHA-256 digest. SRI is validated before transformations.
 
 On a later mount:
 
-1. Every resource is revalidated with its own `If-None-Match` value.
-2. A `304` reuses the already verified bytes for that resource.
-3. A changed ETag causes a complete graph refresh, even when the URL stayed the
-   same.
-4. If an asset has no ETag, a `200` is hashed and unchanged bytes reuse the
-   current generation.
-5. The existing generation is reused only when all revalidated resource
-   metadata and bytes still match.
-6. Any detected change rebuilds the complete graph as a new generation.
-7. A network or refresh failure returns the last locally verified generation,
-   when one exists.
+1. Every resource with an ETag is requested with `If-None-Match`.
+2. `304` reuses verified bytes for that resource.
+3. A changed resource rebuilds the complete generation.
+4. A resource without an ETag is downloaded and hashed again.
+5. The active state pointer changes only after all files and the manifest are
+   complete.
+6. Corrupt or incomplete generations are rejected.
+7. A refresh/network failure can reuse the last verified retained generation.
 
-A generation is written completely before `state.json` points at it. Local HTML
-is re-hashed before use; a corrupt active generation falls back to another
-valid retained generation. The default policy keeps unleased generations to at
-most two within a shared 512 MiB budget per origin. A mounted WebView lease may
-temporarily retain an older generation beyond either limit so an in-flight
-stream is never deleted; releasing the lease immediately makes it eligible for
-pruning. Increase `maxBytes` if two complete game generations must coexist for
-rollback.
+Generations are bounded by `maxBytes` and `maxGenerations`; defaults are
+512 MiB and two generations. Mounted generations are leased so pruning cannot
+delete a file while native code may still stream it.
 
-Resources that must become data URLs are capped at 32 MiB each by default.
-`maxInlineBytes` prevents a large media element or other inline-only resource
-from expanding into a much larger HTML string. Unity `.data` and `.wasm`
-artifacts use the file-stream bridge and are not subject to that inline limit.
+This is a local integrity and crash-consistency model, not publisher
+authentication. The package does not require a signed web-build manifest.
 
-```tsx
-const webView = useRef<LocalWebViewHandle>(null);
+## Security boundary
 
-<LocalWebView
-  cacheAdapter={cacheAdapter}
-  ref={webView}
-  virtualUrl="https://app.example.com/"
-  onCacheRollback={(bundle) => console.log('rolled back', bundle.generationId)}
-/>;
+`virtualUrl` is privileged configuration: downloaded JavaScript executes with
+that origin's authority. Use owned HTTPS origins and a restrictive
+`originWhitelist`. Additional asset origins must be named explicitly in
+`trustedAssetOrigins`; redirects are revalidated at every hop.
 
-await webView.current?.rollback();
+The package cannot faithfully preserve arbitrary response security headers
+when it synthesizes a local HTTPS response. Therefore an entry or worker
+`Content-Security-Policy`/report-only header, or an effective CSP meta tag,
+rejects mirroring by default. `allowContentSecurityPolicyBypass` removes the
+policy only after an explicit opt-in, and that choice is part of the cache
+generation fingerprint.
+
+Local interception validates the recorded file size and only handles GET/HEAD.
+A POST, PUT, PATCH, or DELETE that happens to use the same URL as a cached
+asset is sent to the network. On iOS, same-origin asynchronous fetch and XHR
+bodies are spooled to a bounded temporary file because the private WebKit
+scheme hook otherwise drops them.
+
+## iOS private API warning
+
+iOS keeps the HTTPS origin by registering `https` with `NSURLProtocol` through
+the private
+`WKBrowsingContextController registerSchemeForCustomProtocol:` selector.
+
+That distinction matters:
+
+- the mechanism works in the simulator and is technically usable on physical
+  devices where the SPI is present;
+- it is not a public WebKit contract and may change between OS releases; and
+- App Store review can reject binaries that use private API.
+
+Treat iOS as a benchmark/PoC or non-App-Store distribution path until a public
+interception mechanism replaces it. Android uses only public WebView APIs.
+
+HTTPS protocol and `URLProtocol` registration are process-wide. While a local
+view is mounted, Foundation/WebKit requests to one of its registered origins
+can traverse this package's forwarding path. Concurrent iOS views targeting the
+same exact resource URL should use the same active generation; running
+different generations of one origin simultaneously is not supported. The hook
+is reference-counted and removed after the last local view is dropped when the
+matching private unregister selector is available.
+
+## Verification
+
+The unit suite extracts the exact own-property inventories from the installed
+React Native WebView 13.16.0 TypeScript declarations, preventing a newly
+missing prop from silently passing review.
+
+The Release showcase E2E individually mounts and completes:
+
+- all 60 applicable Android props on current and low-resource emulators; and
+- all 73 applicable iOS props on a simulator.
+
+Grouped semantic cases verify origin/history, both injection phases, frame
+targeting, messages, synthetic event methods, navigation blocking, popups,
+scrolling, all imperative methods, JavaScript disabling, Basic Auth, HTTP and
+subresource errors, downloads, user agents, DOM storage, loading/error
+renderers, GET/HEAD-only local interception, and native 206 Range responses.
+The method-routing case also proves that same-origin fetch and asynchronous XHR
+POST bodies reach the server instead of being served from a cached URL.
+
+```sh
+yarn e2e:props:android:latest
+yarn e2e:props:android:low
+yarn e2e:props:ios
 ```
 
-`LocalWebView` attempts one automatic rollback only when the initial
-same-origin main-frame load of a newly activated local document fails and a
-previous generation exists.
+The larger manual suite covers 50/200/500 MiB Unity graphs, warm/offline starts,
+100/500/1,000-resource revalidation, ETag-free files, cookies, ranges, workers,
+and the explicit CSP rejection/bypass path. It runs the same fixtures first as a
+plain remote `react-native-webview` and then as the Nitro local runtime, producing
+side-by-side page-ready, background-storage, network, offline, and memory
+metrics. See
+[`../../e2e/README.md`](../../e2e/README.md).
 
-## History and native back navigation
-
-The injected bridge observes the browser's real History API. It wraps
-`pushState` and `replaceState` only to report changes; it does not replace
-`back`, `forward`, `go`, `length`, `state`, or scroll restoration. This keeps
-CSR routing in the WebView session-history stack and enables the iOS
-back/forward swipe gesture by default. `canGoBack` and `canGoForward` come from
-the native `react-native-webview` event, so hash-created entries and duplicate
-URLs are not guessed by a separate JavaScript stack.
-
-```tsx
-const ref = useRef<LocalWebViewHandle>(null);
-const [history, setHistory] = useState<LocalWebViewHistoryState>();
-
-<LocalWebView
-  ref={ref}
-  cacheAdapter={cacheAdapter}
-  virtualUrl="https://app.example.com/"
-  onHistoryChange={setHistory}
-/>;
-
-if (history?.canGoBack) ref.current?.goBack();
-```
-
-Use that pattern from an Android hardware-back handler. Reserved bridge
-messages are consumed internally; ordinary `onMessage` traffic is forwarded to
-your callback.
-
-## Component API
-
-Additional `LocalWebView` props:
-
-| Prop                               | Purpose                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------- |
-| `cacheAdapter`                     | Required host file, hashing, and abortable download implementation        |
-| `virtualUrl`                       | Required public HTTPS entry URL and virtual origin                        |
-| `trustedAssetOrigins`              | Additional public HTTPS origins allowed through native mirroring          |
-| `allowContentSecurityPolicyBypass` | Permit entry/Worker CSP and report-only removal; defaults to `false`      |
-| `cacheDirectory`                   | Override the origin-specific Documents directory                          |
-| `cachePolicy`                      | Set `maxBytes`, `maxGenerations`, and `maxInlineBytes`                    |
-| `forceRefresh`                     | Rebuild without first reusing a matching generation                       |
-| `sourcePath`                       | Skip discovery and open existing local HTML with `virtualUrl` as its base |
-| `onBundleReady` / `onBundleError`  | Observe bundle preparation                                                |
-| `onCacheRollback`                  | Observe automatic or imperative rollback                                  |
-| `onHistoryChange`                  | Observe browser and native navigation state                               |
-| `renderLoading` / `renderError`    | Replace preparation UI                                                    |
-
-The forwarded `LocalWebViewHandle` exposes `goBack`, `goForward`, `reload`,
-`stopLoading`, `injectJavaScript`, `getHistoryState`, and `rollback`.
-
-Lower-level exports are available for custom composition:
-`resolveWebBundle`, `readMirroredWebBundle`, `retainWebBundle`,
-`rollbackWebBundle`, and `cacheDirectoryForOrigin`.
-`MirroredWebBundle.localAssets` reports the verified streamable inventory
-without exposing those paths inside the WebView.
-
-Acquire a generation lease before handing its HTML or asset inventory to a
-custom WebView, then release it only after that WebView has stopped using the
-generation:
-
-```ts
-const bundle = await resolveWebBundle({ cacheAdapter, virtualUrl });
-const cacheDirectory = cacheDirectoryForOrigin(virtualUrl, cacheAdapter);
-const release = retainWebBundle(cacheDirectory, bundle.generationId);
-
-try {
-  const html = await readMirroredWebBundle(bundle.sourcePath, cacheAdapter);
-  // Keep `release` for the lifetime of the WebView using `html` and
-  // `bundle.localAssets`.
-} catch (error) {
-  release();
-  throw error;
-}
-
-// Call this after the WebView is unmounted or switches generations.
-release();
-```
-
-`LocalWebView` manages this lease automatically.
-
-## Platform requirements
-
-- The target WebView must support import maps, `Response`, `ReadableStream`,
-  and asynchronous XHR. Localized ES-module applications cannot run on a
-  system WebView without import-map support.
-- iOS uses only public `WKWebView` behavior exposed by
-  `react-native-webview`; the mechanism is the same on physical devices and
-  simulators.
-- Android uses the installed Android System WebView through
-  `react-native-webview`, so capability depends on the WebView version shipped
-  or updated on the device.
-- Persistent generations default to the cache adapter's Documents directory
-  and may be moved with `cacheDirectory`. Interrupted downloads use a staging
-  directory inside that cache root and are reclaimed on the next resolve.
-
-Treat `virtualUrl` as privileged configuration. Downloaded JavaScript runs with
-that origin's authority. Use owned HTTPS origins and a navigation allowlist.
-CSP is never discarded silently: an entry `Content-Security-Policy` or
-`Content-Security-Policy-Report-Only` header, an effective
-`<meta http-equiv="content-security-policy">`, or either header on a
-Worker/SharedWorker root response rejects localization by default.
-Set `allowContentSecurityPolicyBypass` only after deciding that replacing that
-policy with the local bridge is acceptable. This choice and the trusted-origin
-set are part of the cache-generation policy, so a permissive generation cannot
-be reused or rolled back into a stricter mount.
-
-The example uses `createReactNativeBlobUtilCacheAdapter`, targets
-`book.jingjing2222.com`, and enables that option explicitly because the origin
-sends a CSP that intentionally excludes the inline and data-URL sources used
-by localization.
-
-Statically unknowable URLs—such as a worker path assembled from arbitrary
-runtime input—cannot be discovered by crawling alone. Express deploy-time asset
-references as normal module imports, literal `import()`, `new URL(...)`,
-HTML/CSS references, or let those requests use the network.
-
-## Development
-
-The repository pins Node.js 24.15.0 with mise:
+## Development and release
 
 ```sh
 mise install
@@ -533,37 +424,18 @@ mise exec -- corepack yarn install --immutable
 mise exec -- corepack yarn check
 ```
 
-`tsdown` is the package build source of truth. Its `exports: true` setting owns
-the export map written to `package.json`; the JavaScript, source maps,
-declarations, and declaration maps are emitted under `dist/`. Formatting and
-linting use `oxfmt` and type-aware `oxlint`.
+Node 24.15.0 is pinned by mise. `tsdown` with `exports: true` owns the package
+output and export map. `oxfmt` and type-aware `oxlint` own formatting and
+linting.
 
-Run the showcase from the repository root:
-
-```sh
-mise exec -- corepack yarn showcase ios
-# or
-mise exec -- corepack yarn showcase android
-```
-
-The showcase mirrors `https://book.jingjing2222.com/`.
-
-## Releasing
-
-Add a Changeset with the package change:
+Add a Changeset for a package change:
 
 ```sh
 yarn changeset
 ```
 
-After that change reaches `main`, the **Release** workflow creates or updates
-the Changesets version pull request. Merge that pull request when the package
-is ready to publish. The next `main` run builds the package and runs
-`changeset publish`.
-
-npm publishing uses GitHub Actions OIDC trusted publishing through the
-**Release** workflow and does not require an npm token. The initial Changeset
-advances `0.0.1` to `0.0.2`.
+The **Release** GitHub Actions workflow manages the Changesets version PR and
+publishes through npm OIDC after that PR is merged.
 
 ## License
 

@@ -3,8 +3,13 @@ set -euo pipefail
 
 suite="${1:-full}"
 origin="${2:-https://macmini.taile38920.ts.net:8443}"
-if [[ "$suite" != "full" && "$suite" != "smoke" ]]; then
-  echo "Usage: $0 [full|smoke] [origin]" >&2
+runtime="${3:-native}"
+if [[ "$suite" != "full" && "$suite" != "smoke" && "$suite" != "props" ]]; then
+  echo "Usage: $0 [full|smoke|props] [origin] [bridge|native|remote]" >&2
+  exit 2
+fi
+if [[ "$runtime" != "bridge" && "$runtime" != "native" && "$runtime" != "remote" ]]; then
+  echo "Usage: $0 [full|smoke|props] [origin] [bridge|native|remote]" >&2
   exit 2
 fi
 
@@ -12,7 +17,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 artifact_root="${BENCHMARK_ARTIFACTS:-e2e/artifacts}"
 mkdir -p "$artifact_root"
-run_id="ios-simulator-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)"
+run_id="${BENCHMARK_RUN_ID:-ios-simulator-${runtime}-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)}"
 result_path="$artifact_root/${run_id}.json"
 memory_path="$artifact_root/${run_id}-memory.csv"
 environment_path="$artifact_root/${run_id}-environment.txt"
@@ -49,6 +54,59 @@ xcrun simctl bootstatus "$simulator_udid" -b
 xcrun simctl install "$simulator_udid" "$app_path"
 xcrun simctl terminate "$simulator_udid" localwebview.example >/dev/null 2>&1 || true
 
+if [[ "$runtime" != "remote" || "$suite" == "props" ]]; then
+prop_run_id="ios-simulator-props-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)"
+prop_result_path="$artifact_root/${prop_run_id}.json"
+prop_url="$(
+  node -e '
+    const [origin, runId] = process.argv.slice(1);
+    const url = new URL("local-webview-benchmark://compatibility");
+    url.searchParams.set("origin", origin);
+    url.searchParams.set("runId", runId);
+    url.searchParams.set("platform", "ios");
+    url.searchParams.set("profile", "simulator");
+    process.stdout.write(url.href);
+  ' "$origin" "$prop_run_id"
+)"
+SIMCTL_CHILD_LOCAL_WEBVIEW_BENCHMARK_URL="$prop_url" \
+  xcrun simctl launch "$simulator_udid" localwebview.example
+prop_completed=0
+for _ in $(seq 1 600); do
+  response="$(curl --fail --silent --show-error http://127.0.0.1:4173/__control/results || true)"
+  if [[ "$(jq -r '.runId // ""' <<<"$response" 2>/dev/null || true)" == "$prop_run_id" ]] &&
+    [[ "$(jq -r '.completed == true' <<<"$response" 2>/dev/null || echo false)" == "true" ]]; then
+    printf '%s\n' "$response" >"$prop_result_path"
+    prop_completed=1
+    break
+  fi
+  sleep 1
+done
+xcrun simctl terminate "$simulator_udid" localwebview.example >/dev/null 2>&1 || true
+if [[ "$prop_completed" -ne 1 ]]; then
+  echo "iOS prop E2E timed out: $prop_run_id" >&2
+  exit 1
+fi
+jq -e '
+  ([.reports[] | select(.kind == "complete") | .error // empty] | length) == 0 and
+  ([.reports[] | select(.kind == "webview-prop-compatibility")] | length) == 1 and
+  ([.reports[] | select(.kind == "webview-prop-compatibility") |
+    (.total > 0 and
+      (.passed | length) == .total and
+      .behaviorTotal > 0 and
+      (.behaviorPassed | length) == .behaviorTotal)] |
+    all)
+' "$prop_result_path" >/dev/null
+
+if [[ "$suite" == "props" ]]; then
+  jq -r '
+    .reports[]
+    | select(.kind == "webview-prop-compatibility")
+    | "iOS \(.profile): \(.passed | length)/\(.total) props and \(.behaviorPassed | length) behaviors passed in \(.durationMilliseconds) ms"
+  ' "$prop_result_path"
+  exit 0
+fi
+fi
+
 find_app_process() {
   ps -ax -o pid=,ppid=,command= |
     awk -v parent="$simulator_launchd_pid" \
@@ -80,11 +138,17 @@ baseline_webkit_pids="$(
 
 {
   echo "profile=ios-simulator"
+  echo "runtime=$runtime"
   echo "simulator_udid=$simulator_udid"
   echo "simulator_launchd_pid=$simulator_launchd_pid"
   xcrun simctl list devices | grep "$simulator_udid" || true
   echo "simulator_runtime_version=$(xcrun simctl getenv "$simulator_udid" SIMULATOR_RUNTIME_VERSION)"
-  system_profiler SPHardwareDataType
+  system_profiler SPHardwareDataType |
+    awk -F ': ' '
+      /Model Name:|Model Identifier:|Chip:|Total Number of Cores:|Memory:/ {
+        print $1 "=" $2
+      }
+    '
 } >"$environment_path"
 
 printf 'timestamp_ms,host_rss_kib,webkit_rss_kib,total_rss_kib\n' >"$memory_path"
@@ -107,22 +171,23 @@ printf 'timestamp_ms,host_rss_kib,webkit_rss_kib,total_rss_kib\n' >"$memory_path
           END { printf "%d,%d,%d", host, webkit, host + webkit }'
     )"
     printf '%s,%s\n' "$timestamp_ms" "$memory" >>"$memory_path"
-    sleep 2
+    sleep 0.5
   done
 ) &
 sampler_pid=$!
 
 benchmark_url="$(
   node -e '
-    const [origin, runId, suite] = process.argv.slice(1);
+    const [origin, runId, runtime, suite] = process.argv.slice(1);
     const url = new URL("local-webview-benchmark://run");
     url.searchParams.set("origin", origin);
     url.searchParams.set("runId", runId);
     url.searchParams.set("platform", "ios");
     url.searchParams.set("profile", "simulator");
+    url.searchParams.set("runtime", runtime);
     url.searchParams.set("suite", suite);
     process.stdout.write(url.href);
-  ' "$origin" "$run_id" "$suite"
+  ' "$origin" "$run_id" "$runtime" "$suite"
 )"
 
 SIMCTL_CHILD_LOCAL_WEBVIEW_BENCHMARK_URL="$benchmark_url" \
@@ -141,16 +206,17 @@ record_app_failure() {
     -X POST \
     --data "$(
       node -e '
-        const [error, platform, profile, runId, suite] = process.argv.slice(1);
+        const [error, platform, profile, runId, runtime, suite] = process.argv.slice(1);
         process.stdout.write(JSON.stringify({
           error,
           kind: "complete",
           platform,
           profile,
           runId,
+          runtime,
           suite,
         }));
-      ' "$failure" ios simulator "$run_id" "$suite"
+      ' "$failure" ios simulator "$run_id" "$runtime" "$suite"
     )" \
     http://127.0.0.1:4173/__control/complete \
     >/dev/null

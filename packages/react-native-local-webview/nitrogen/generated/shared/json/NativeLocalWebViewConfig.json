@@ -1,0 +1,17 @@
+{
+  "uiViewClassName": "NativeLocalWebView",
+  "supportsRawText": false,
+  "bubblingEventTypes": {},
+  "directEventTypes": {},
+  "validAttributes": {
+    "assetsJson": true,
+    "baseUrl": true,
+    "configurationJson": true,
+    "documentId": true,
+    "html": true,
+    "sourceJson": true,
+    "onEvent": true,
+    "onShouldStartLoadWithRequest": true,
+    "hybridRef": true
+  }
+}

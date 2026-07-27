@@ -95,3 +95,52 @@ export function prepareWebViewDocument(
 
   return changed ? serialize(document) : html;
 }
+
+/**
+ * The Nitro runtime serves assets inside a real WKWebView/Android WebView HTTPS
+ * document and therefore needs neither the JS asset transport nor a History API
+ * shim. It only applies the explicit CSP policy and strips bridge scripts that
+ * may have been persisted by an older cache generation.
+ */
+export function prepareNativeWebViewDocument(
+  html: string,
+  allowContentSecurityPolicyBypass = false,
+  documentStartScript?: string
+): string {
+  const document = parse(html);
+  let head: HtmlElement | undefined;
+  const removable: HtmlElement[] = [];
+  const policies: HtmlElement[] = [];
+  const visit = (node: HtmlNode): void => {
+    if ('tagName' in node) {
+      if (node.tagName === 'head') head = node;
+      if (
+        node.tagName === 'script' &&
+        (marker(node, ASSET_BRIDGE_MARKER) || marker(node, HISTORY_BRIDGE_MARKER))
+      ) {
+        removable.push(node);
+      } else if (isEffectiveMetaContentSecurityPolicy(node)) {
+        policies.push(node);
+      }
+    }
+    if ('childNodes' in node) {
+      for (const child of node.childNodes) visit(child);
+    }
+  };
+  visit(document);
+  if (policies.length > 0 && !allowContentSecurityPolicyBypass) {
+    throw new ContentSecurityPolicyError(
+      'The entry HTML contains a Content-Security-Policy meta tag. Set allowContentSecurityPolicyBypass to true only when removing that policy is intentional.'
+    );
+  }
+  for (const node of [...removable, ...policies]) removeElement(node);
+  if (documentStartScript) {
+    if (!head) throw new Error('HTML document does not contain a <head>');
+    const bootstrap = scriptElement('data-local-webview-native-bootstrap', documentStartScript);
+    bootstrap.parentNode = head;
+    head.childNodes.unshift(bootstrap);
+  }
+  return removable.length > 0 || policies.length > 0 || documentStartScript
+    ? serialize(document)
+    : html;
+}

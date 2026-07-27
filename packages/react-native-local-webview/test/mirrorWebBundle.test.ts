@@ -29,7 +29,7 @@ const native = vi.hoisted(() => {
     directories: new Set<string>(['/documents', '/temporary']),
     files: new Map<string, Uint8Array>(),
     moves: [] as Array<{ destination: string; source: string }>,
-    requests: [] as Array<{ etag?: string; url: string }>,
+    requests: [] as Array<{ etag?: string; origin?: string; url: string }>,
     responses: new Map<string, Response>(),
   };
 });
@@ -85,7 +85,11 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     });
     const response = native.responses.get(options.url);
     const etag = options.headers?.['If-None-Match'];
-    native.requests.push({ etag, url: options.url });
+    native.requests.push({
+      etag,
+      ...(options.headers?.Origin ? { origin: options.headers.Origin } : {}),
+      url: options.url,
+    });
     if (!response) throw new Error(`No response for ${options.url}`);
     if (response.error) throw response.error;
     const status = etag && response.etag === etag ? 304 : (response.status ?? 200);
@@ -811,6 +815,40 @@ describe('resolveWebBundle', () => {
 
     expect(second.generationId).toBe(first.generationId);
     expect(second.usedCachedBundle).toBe(true);
+  });
+
+  it('reports a cache miss or verified generation before starting network work', async () => {
+    const observations: Array<{
+      bundle: string | undefined;
+      requests: number;
+    }> = [];
+    const first = await resolveWebBundle({
+      onCachedBundle: (bundle) => {
+        observations.push({
+          bundle: bundle?.generationId,
+          requests: native.requests.length,
+        });
+      },
+      virtualUrl: ENTRY,
+    });
+
+    expect(observations).toEqual([{ bundle: undefined, requests: 0 }]);
+
+    native.requests.length = 0;
+    await resolveWebBundle({
+      onCachedBundle: (bundle) => {
+        observations.push({
+          bundle: bundle?.generationId,
+          requests: native.requests.length,
+        });
+      },
+      virtualUrl: ENTRY,
+    });
+
+    expect(observations[1]).toEqual({
+      bundle: first.generationId,
+      requests: 0,
+    });
   });
 
   it('returns an offline fallback with sibling validators already in flight', async () => {
@@ -1752,8 +1790,11 @@ describe('resolveWebBundle', () => {
 
   it('keeps cross-origin references remote unless their origin is explicitly trusted', async () => {
     const cdn = 'https://cdn.example/app.js';
+    const cdnBinary = 'https://cdn.example/game.wasm';
     native.responses.set(ENTRY, {
-      body: `<!doctype html><script type="module" src="${cdn}"></script>`,
+      body: `<!doctype html>
+        <link rel="preload" href="${cdnBinary}" as="fetch" type="application/wasm">
+        <script type="module" src="${cdn}"></script>`,
       etag: '"cross-origin-entry"',
       mediaType: 'text/html',
     });
@@ -1761,6 +1802,16 @@ describe('resolveWebBundle', () => {
       body: 'export const ready = true;',
       etag: '"cdn-script"',
       mediaType: 'text/javascript',
+    });
+    native.responses.set(cdnBinary, {
+      body: 'wasm-bytes',
+      etag: '"cdn-wasm"',
+      headers: {
+        'Access-Control-Allow-Origin': 'https://app.example',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+        'Set-Cookie': 'must-not-be-replayed=true',
+      },
+      mediaType: 'application/wasm',
     });
 
     const defaultBundle = await resolveWebBundle({ virtualUrl: ENTRY });
@@ -1773,7 +1824,17 @@ describe('resolveWebBundle', () => {
       virtualUrl: ENTRY,
     });
     expect(native.requests.some((request) => request.url === cdn)).toBe(true);
+    expect(
+      native.requests
+        .filter((request) => request.url === cdn || request.url === cdnBinary)
+        .map((request) => request.origin)
+    ).toEqual(['https://app.example', 'https://app.example']);
     expect(await readMirroredWebBundle(trustedBundle.sourcePath)).not.toContain(`src="${cdn}"`);
+    expect(trustedBundle.localAssets[cdnBinary]?.responseHeaders).toEqual({
+      'access-control-allow-origin': 'https://app.example',
+      'cross-origin-resource-policy': 'cross-origin',
+      'etag': '"cdn-wasm"',
+    });
   });
 
   it('requires explicit CSP removal for both HTTP headers and meta tags', async () => {

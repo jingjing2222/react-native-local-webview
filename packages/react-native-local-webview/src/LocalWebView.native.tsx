@@ -227,11 +227,16 @@ function bridgeMessageEnvelope(
 export type { LocalWebViewHistoryState } from './historyState';
 
 export type LocalWebViewHandle = {
+  clearCache: (includeDiskFiles: boolean) => void;
+  clearFormData: () => void;
+  clearHistory: () => void;
   getHistoryState: () => LocalWebViewHistoryState;
   goBack: () => void;
   goForward: () => void;
   injectJavaScript: (script: string) => void;
+  postMessage: (message: string) => void;
   reload: () => void;
+  requestFocus: () => void;
   rollback: () => Promise<boolean>;
   stopLoading: () => void;
 };
@@ -244,6 +249,7 @@ export type LocalWebViewProps = Omit<WebViewProps, 'source' | 'renderLoading' | 
   forceRefresh?: boolean;
   onBundleError?: (error: Error) => void;
   onBundleReady?: (bundle: MirroredWebBundle) => void;
+  onBundleStored?: (bundle: MirroredWebBundle) => void;
   onCacheRollback?: (bundle: MirroredWebBundle) => void;
   onHistoryChange?: (state: LocalWebViewHistoryState) => void;
   renderError?: (error: Error) => ReactNode;
@@ -287,6 +293,7 @@ export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(fu
     injectedJavaScriptBeforeContentLoaded,
     onBundleError,
     onBundleReady,
+    onBundleStored,
     onCacheRollback,
     onError,
     onHistoryChange,
@@ -333,11 +340,13 @@ export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(fu
   const callbacksRef = useRef({
     onBundleError,
     onBundleReady,
+    onBundleStored,
     onCacheRollback,
   });
   callbacksRef.current = {
     onBundleError,
     onBundleReady,
+    onBundleStored,
     onCacheRollback,
   };
   const cacheRoot = cacheDirectory ?? cacheDirectoryForOrigin(virtualUrl, cacheAdapter);
@@ -611,11 +620,16 @@ export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(fu
   useImperativeHandle(
     forwardedRef,
     () => ({
+      clearCache: (includeDiskFiles) => webViewRef.current?.clearCache(includeDiskFiles),
+      clearFormData: () => webViewRef.current?.clearFormData?.(),
+      clearHistory: () => webViewRef.current?.clearHistory?.(),
       getHistoryState: () => historyRef.current,
       goBack: () => webViewRef.current?.goBack(),
       goForward: () => webViewRef.current?.goForward(),
       injectJavaScript: (script) => webViewRef.current?.injectJavaScript(script),
+      postMessage: (message) => webViewRef.current?.postMessage(message),
       reload: () => webViewRef.current?.reload(),
+      requestFocus: () => webViewRef.current?.requestFocus(),
       rollback,
       stopLoading: () => webViewRef.current?.stopLoading(),
     }),
@@ -703,6 +717,7 @@ export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(fu
         }
         activateBundle(bundle, contents, nextCapability, preparedLease);
         callbacksRef.current.onBundleReady?.(bundle);
+        callbacksRef.current.onBundleStored?.(bundle);
       })
       .catch((reason: unknown) => {
         if (!active || loadEpochRef.current !== loadEpoch) return;

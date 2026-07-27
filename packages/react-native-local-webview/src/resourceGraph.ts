@@ -58,6 +58,7 @@ export type LoadedResource = {
   localPath?: string;
   mediaType: string;
   redirected?: boolean;
+  responseHeaders?: Record<string, string>;
   responseUrl?: string;
   sha256: string;
   size: number;
