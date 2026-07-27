@@ -1,6 +1,6 @@
 {
   "name": "react-native-local-webview",
-  "version": "0.0.1-alpha.0",
+  "version": "0.0.1",
   "description": "Run CSR and Unity WebGL bundles from durable local storage without giving up their HTTPS origin.",
   "keywords": [
     "android",
