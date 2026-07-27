@@ -1,0 +1,31 @@
+{
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "name": "benchmark-e2e",
+  "projectType": "application",
+  "root": "e2e",
+  "implicitDependencies": ["react-native-local-webview", "showcase"],
+  "tags": ["scope:e2e", "type:benchmark"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "inputs": ["default", "{workspaceRoot}/scripts/e2e/**/*"],
+      "options": {
+        "command": "yarn oxlint --deny-warnings --import-plugin --promise-plugin e2e scripts/e2e"
+      }
+    },
+    "fixture": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node e2e/fixture-server.mjs"
+      }
+    },
+    "fixture:prepare": {
+      "cache": true,
+      "outputs": ["{projectRoot}/.cache/unity-wordly"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node e2e/fixtures/unity/prepare.mjs"
+      }
+    }
+  }
+}

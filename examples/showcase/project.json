@@ -1,0 +1,42 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "showcase",
+  "projectType": "application",
+  "root": "examples/showcase",
+  "sourceRoot": "examples/showcase/src",
+  "implicitDependencies": ["react-native-local-webview"],
+  "tags": ["scope:example", "type:react-native"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "yarn oxlint --type-aware --deny-warnings --react-plugin --import-plugin --promise-plugin examples/showcase/src"
+      }
+    },
+    "android:release": {
+      "dependsOn": ["react-native-local-webview:build"],
+      "executor": "nx:run-commands",
+      "outputs": ["{projectRoot}/android/app/build/outputs/apk/release"],
+      "options": {
+        "command": "./android/gradlew -p android --no-daemon --console=plain assembleRelease",
+        "cwd": "examples/showcase"
+      }
+    },
+    "ios:release": {
+      "dependsOn": ["react-native-local-webview:build"],
+      "executor": "nx:run-commands",
+      "outputs": ["{projectRoot}/ios/build"],
+      "options": {
+        "command": "xcodebuild -workspace ios/LocalWebviewExample.xcworkspace -scheme LocalWebviewExample -configuration Release -sdk iphonesimulator -destination \"id=$SIMULATOR_UDID\" -derivedDataPath ios/build build",
+        "cwd": "examples/showcase"
+      }
+    },
+    "typecheck": {
+      "dependsOn": ["react-native-local-webview:build"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "yarn tsc --noEmit -p examples/showcase/tsconfig.json"
+      }
+    }
+  }
+}
