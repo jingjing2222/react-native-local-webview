@@ -1,101 +1,70 @@
 # Contributing
 
-Contributions are always welcome, no matter how large or small!
+Contributions are welcome. Please read the
+[code of conduct](./CODE_OF_CONDUCT.md) before participating.
 
-We want this community to be friendly and respectful to each other. Please follow it in all your interactions with the project. Before contributing, please read the [code of conduct](./CODE_OF_CONDUCT.md).
+## Toolchain
 
-## Development workflow
-
-This project is a monorepo managed using [Yarn workspaces](https://yarnpkg.com/features/workspaces). It contains the following packages:
-
-- The library package in the root directory.
-- An example app in the `example/` directory.
-
-To get started with the project, make sure you have the correct version of [Node.js](https://nodejs.org/) installed. See the [`.nvmrc`](./.nvmrc) file for the version used in this project.
-
-Run `yarn` in the root directory to install the required dependencies for each package:
+The repository uses Yarn workspaces and pins Node.js 24.15.0 in
+[`mise.toml`](./mise.toml).
 
 ```sh
-yarn
+mise install
+mise exec -- corepack yarn install --immutable
 ```
 
-> Since the project relies on Yarn workspaces, you cannot use [`npm`](https://github.com/npm/cli) for development without manually migrating.
+The root workspace contains the TypeScript library. `example/` contains the
+React Native application and consumes the local package through the workspace.
+The library has no native project of its own. WebView is a peer dependency;
+filesystem and downloader behavior comes from a cache adapter. The example
+uses the included `createReactNativeBlobUtilCacheAdapter` preset.
 
-The [example app](/example/) demonstrates usage of the library. You need to run it to test any changes you make.
+## Checks
 
-It is configured to use the local version of the library, so any changes you make to the library's source code will be reflected in the example app. Changes to the library's JavaScript code will be reflected in the example app without a rebuild, but native code changes will require a rebuild of the example app.
+Run the same complete check used by CI:
 
-If you want to use Android Studio or Xcode to edit the native code, you can open the `example/android` or `example/ios` directories respectively in those editors. To edit the Objective-C or Swift files, open `example/ios/LocalWebviewExample.xcworkspace` in Xcode and find the source files at `Pods > Development Pods > react-native-local-webview`.
+```sh
+mise exec -- corepack yarn check
+```
 
-To edit the Java or Kotlin files, open `example/android` in Android studio and find the source files at `react-native-local-webview` under `Android`.
+Individual commands are also available:
 
-You can use various commands from the root directory to work with the project.
+```sh
+yarn format:check
+yarn lint
+yarn typecheck
+yarn test
+yarn test:coverage
+yarn build
+yarn publint
+```
 
-To start the packager:
+Apply formatting with:
+
+```sh
+yarn format
+```
+
+The unit suite verifies every static CSR template name shipped by the pinned
+`create-vite` test catalog. It tests the resulting entry HTML and generic
+resource graph; Vite is not part of the public package API.
+
+## Example app
 
 ```sh
 yarn example start
-```
-
-To run the example app on Android:
-
-```sh
+yarn example ios
+# or
 yarn example android
 ```
 
-To run the example app on iOS:
+Re-run CocoaPods or Gradle setup only when changing the example's installed
+native dependencies.
 
-```sh
-yarn example ios
-```
+## Pull requests
 
-To confirm that the app is running with the new architecture, you can check the Metro logs for a message like this:
-
-```sh
-Running "LocalWebviewExample" with {"fabric":true,"initialProps":{"concurrentRoot":true},"rootTag":1}
-```
-
-Note the `"fabric":true` and `"concurrentRoot":true` properties.
-
-Make sure your code passes TypeScript:
-
-```sh
-yarn typecheck
-```
-
-To check for linting errors, run the following:
-
-```sh
-yarn lint
-```
-
-To fix formatting errors, run the following:
-
-```sh
-yarn lint --fix
-```
-
-
-
-### Scripts
-
-The `package.json` file contains various scripts for common tasks:
-
-- `yarn`: setup project by installing dependencies.
-- `yarn typecheck`: type-check files with TypeScript.
-  - `yarn lint`: lint files with [ESLint](https://eslint.org/).
-    - `yarn example start`: start the Metro server for the example app.
-- `yarn example android`: run the example app on Android.
-- `yarn example ios`: run the example app on iOS.
-  
-### Sending a pull request
-
-> **Working on your first pull request?** You can learn how from this _free_ series: [How to Contribute to an Open Source Project on GitHub](https://app.egghead.io/playlists/how-to-contribute-to-an-open-source-project-on-github).
-
-When you're sending a pull request:
-
-- Prefer small pull requests focused on one change.
-- Verify that linters and tests are passing.
-- Review the documentation to make sure it looks good.
-- Follow the pull request template when opening a pull request.
-- For pull requests that change the API or implementation, discuss with maintainers first by opening an issue.
+- Keep a pull request focused on one coherent change.
+- Add or update unit tests for behavior changes.
+- Run `yarn check`.
+- Update the README when changing public behavior or types.
+- Explain cache-format compatibility in the PR body.

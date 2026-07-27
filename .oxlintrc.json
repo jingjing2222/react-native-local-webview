@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    ".yarn/**",
+    "example/android/**",
+    "example/ios/**",
+    "dist/**",
+    "node_modules/**"
+  ],
+  "plugins": ["import", "promise", "react", "typescript", "vitest"],
+  "rules": {
+    "no-console": "off",
+    "react/react-in-jsx-scope": "off"
+  }
+}

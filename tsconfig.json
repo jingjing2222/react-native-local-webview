@@ -6,10 +6,7 @@
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,
-    "customConditions": [
-      "react-native-local-webview-source",
-      "react-native-strict-api"
-    ],
+    "customConditions": ["react-native-local-webview-source", "react-native-strict-api"],
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "jsx": "react-jsx",
