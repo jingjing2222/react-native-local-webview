@@ -19,6 +19,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val DOWNLOAD_LIMIT_PREFIX = "LOCAL_WEBVIEW_DOWNLOAD_LIMIT"
+private const val DOWNLOAD_BUFFER_BYTES = 256 * 1024
 
 private fun cacheFile(path: String): File =
   if (path.startsWith("file://")) File(URI(path)) else File(path)
@@ -32,6 +33,14 @@ private fun prepareCacheDestination(file: File) {
 }
 
 private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+private fun nativeDigestName(algorithm: String): String =
+  when (algorithm) {
+    "sha256" -> "SHA-256"
+    "sha384" -> "SHA-384"
+    "sha512" -> "SHA-512"
+    else -> error("Unsupported hash algorithm: $algorithm")
+  }
 
 class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
   private val activeDownloads = ConcurrentHashMap<String, HttpURLConnection>()
@@ -52,7 +61,7 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
       val target = cacheFile(destination)
       prepareCacheDestination(target)
       FileInputStream(cacheFile(source)).use { input ->
-        FileOutputStream(target).use { output -> input.copyTo(output) }
+        FileOutputStream(target).use { output -> input.copyTo(output, DOWNLOAD_BUFFER_BYTES) }
       }
     }
 
@@ -74,6 +83,17 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
         } else {
           null
         }
+      val downloadDigests = linkedMapOf<String, MessageDigest>()
+      val hashAlgorithms = request.optJSONArray("hashAlgorithms")
+      if (hashAlgorithms != null) {
+        for (index in 0 until hashAlgorithms.length()) {
+          val algorithm = hashAlgorithms.getString(index)
+          downloadDigests.putIfAbsent(
+            algorithm,
+            MessageDigest.getInstance(nativeDigestName(algorithm)),
+          )
+        }
+      }
       if (cancelledDownloads.contains(requestId)) {
         throw InterruptedException("The cache download was cancelled.")
       }
@@ -109,8 +129,9 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
           )
         }
 
+        val writesFile = status in 200..299
         val target = cacheFile(request.getString("path"))
-        prepareCacheDestination(target)
+        if (writesFile) prepareCacheDestination(target)
         var receivedBytes = 0L
         val responseStream =
           try {
@@ -118,10 +139,13 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
           } catch (_: java.io.FileNotFoundException) {
             null
           }
-        BufferedOutputStream(FileOutputStream(target)).use { output ->
+        val output =
+          if (writesFile) BufferedOutputStream(FileOutputStream(target), DOWNLOAD_BUFFER_BYTES)
+          else null
+        try {
           if (responseStream != null) {
             BufferedInputStream(responseStream).use { input ->
-              val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+              val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
               while (true) {
                 if (cancelledDownloads.contains(requestId)) {
                   throw InterruptedException("The cache download was cancelled.")
@@ -134,10 +158,15 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
                     "$DOWNLOAD_LIMIT_PREFIX|$maximumBytes|$receivedBytes|$sourceUrl"
                   )
                 }
-                output.write(buffer, 0, count)
+                if (writesFile) {
+                  for (digest in downloadDigests.values) digest.update(buffer, 0, count)
+                }
+                output?.write(buffer, 0, count)
               }
             }
           }
+        } finally {
+          output?.close()
         }
 
         val cookieManager = CookieManager.getInstance()
@@ -153,11 +182,17 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
         for ((name, values) in connection.headerFields) {
           if (name != null) responseHeaders.put(name, values.joinToString(", "))
         }
-        JSONObject()
+        val result =
+          JSONObject()
+          .put("bytesWritten", if (writesFile) receivedBytes else 0)
           .put("headers", responseHeaders)
           .put("responseUrl", connection.url.toString())
           .put("status", status)
-          .toString()
+          .put("wroteFile", writesFile)
+        if (writesFile && downloadDigests.isNotEmpty()) {
+          result.put("digests", JSONObject(downloadDigests.mapValues { hex(it.value.digest()) }))
+        }
+        result.toString()
       } catch (error: Throwable) {
         runCatching { cacheFile(JSONObject(requestJson).getString("path")).delete() }
         throw error
@@ -177,14 +212,7 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
       val digests = linkedMapOf<String, MessageDigest>()
       for (index in 0 until algorithms.length()) {
         val algorithm = algorithms.getString(index)
-        val nativeName =
-          when (algorithm) {
-            "sha256" -> "SHA-256"
-            "sha384" -> "SHA-384"
-            "sha512" -> "SHA-512"
-            else -> error("Unsupported hash algorithm: $algorithm")
-          }
-        digests.putIfAbsent(algorithm, MessageDigest.getInstance(nativeName))
+        digests.putIfAbsent(algorithm, MessageDigest.getInstance(nativeDigestName(algorithm)))
       }
       BufferedInputStream(FileInputStream(cacheFile(path))).use { input ->
         val buffer = ByteArray(1024 * 1024)
@@ -218,7 +246,9 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
       prepareCacheDestination(destinationFile)
       if (!sourceFile.renameTo(destinationFile)) {
         FileInputStream(sourceFile).use { input ->
-          FileOutputStream(destinationFile).use { output -> input.copyTo(output) }
+          FileOutputStream(destinationFile).use { output ->
+            input.copyTo(output, DOWNLOAD_BUFFER_BYTES)
+          }
         }
         check(sourceFile.delete()) { "Could not remove moved source file $sourceFile" }
       }

@@ -14,6 +14,13 @@ export type LocalWebViewFileStat = {
 
 export type LocalWebViewDownloadOptions = {
   followRedirect: false;
+  /**
+   * Digests to compute while streaming the response to `path`.
+   *
+   * Providers may omit the resulting metadata, in which case the core falls
+   * back to hashing the completed file.
+   */
+  hashAlgorithms?: readonly LocalWebViewHashAlgorithm[];
   headers?: Record<string, string>;
   /**
    * Maximum response-body bytes that may be written for this request.
@@ -32,9 +39,25 @@ export type LocalWebViewDownloadOptions = {
 };
 
 export type LocalWebViewDownloadResult = {
+  /**
+   * Exact response-body bytes written to `path`.
+   *
+   * Native implementations provide this so the resource graph does not need
+   * a second filesystem round trip after every completed download.
+   */
+  bytesWritten?: number;
+  /**
+   * Raw hexadecimal digests computed over the bytes written to `path`.
+   */
+  digests?: LocalWebViewFileDigests;
   headers?: Record<string, string>;
   responseUrl: string;
   status: number;
+  /**
+   * Whether this response created `path`. Non-success responses stay entirely
+   * in the native networking layer.
+   */
+  wroteFile?: boolean;
 };
 
 export class LocalWebViewDownloadLimitError extends RangeError {

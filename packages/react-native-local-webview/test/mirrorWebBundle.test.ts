@@ -100,7 +100,7 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
       throw new LocalWebViewDownloadLimitError(options.url, options.maxBytes, bytes.byteLength);
     }
-    if (status >= 200 && status < 300 && status !== 204) {
+    if (status >= 200 && status < 300) {
       native.files.set(options.path, bytes);
     }
     return {
@@ -301,6 +301,84 @@ describe('resolveWebBundle', () => {
         { etag: '"entry-1"', url: ENTRY },
         { etag: '"script-one"', url: SCRIPT },
       ])
+    );
+  });
+
+  it('uses native response metadata without stat or empty-file cleanup round trips', async () => {
+    let temporaryExistsCalls = 0;
+    let temporaryHashCalls = 0;
+    let temporaryRemoveCalls = 0;
+    let temporaryStatCalls = 0;
+    const isTemporaryDownload = (path: string): boolean => path.includes('/staging/download-');
+    const metadataAdapter: LocalWebViewCacheAdapter = {
+      ...cacheAdapter,
+      async download(options) {
+        const result = await cacheAdapter.download(options);
+        const wroteFile =
+          result.status >= 200 && result.status < 300 && native.files.has(options.path);
+        return {
+          ...result,
+          bytesWritten: wroteFile ? file(options.path).byteLength : 0,
+          digests: wroteFile
+            ? await cacheAdapter.hashFile(options.path, options.hashAlgorithms ?? [])
+            : undefined,
+          wroteFile,
+        };
+      },
+      async exists(path) {
+        if (isTemporaryDownload(path)) temporaryExistsCalls += 1;
+        return cacheAdapter.exists(path);
+      },
+      async remove(path) {
+        if (isTemporaryDownload(path)) temporaryRemoveCalls += 1;
+        return cacheAdapter.remove(path);
+      },
+      async hashFile(path, algorithms) {
+        if (isTemporaryDownload(path)) temporaryHashCalls += 1;
+        return cacheAdapter.hashFile(path, algorithms);
+      },
+      async stat(path) {
+        if (isTemporaryDownload(path)) temporaryStatCalls += 1;
+        return cacheAdapter.stat(path);
+      },
+    };
+    const first = await resolveWebBundleWithAdapter({
+      cacheAdapter: metadataAdapter,
+      virtualUrl: ENTRY,
+    });
+    expect(temporaryHashCalls).toBe(0);
+    expect(temporaryStatCalls).toBe(0);
+    temporaryExistsCalls = 0;
+    temporaryHashCalls = 0;
+    temporaryRemoveCalls = 0;
+    temporaryStatCalls = 0;
+
+    const second = await resolveWebBundleWithAdapter({
+      cacheAdapter: metadataAdapter,
+      virtualUrl: ENTRY,
+    });
+
+    expect(second.generationId).toBe(first.generationId);
+    expect({
+      exists: temporaryExistsCalls,
+      hash: temporaryHashCalls,
+      remove: temporaryRemoveCalls,
+      stat: temporaryStatCalls,
+    }).toEqual({ exists: 0, hash: 0, remove: 0, stat: 0 });
+  });
+
+  it('keeps a bodyless successful response as an empty resource', async () => {
+    native.responses.set(SCRIPT, {
+      etag: '"empty-script"',
+      mediaType: 'text/javascript',
+      status: 204,
+    });
+
+    const bundle = await resolveWebBundle({ virtualUrl: ENTRY });
+
+    expect(bundle.downloadedAssets).toContain(SCRIPT);
+    await expect(readMirroredWebBundle(bundle.sourcePath)).resolves.toContain(
+      'data:text/javascript;charset=utf-8,'
     );
   });
 

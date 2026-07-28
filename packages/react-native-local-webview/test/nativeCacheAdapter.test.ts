@@ -15,9 +15,12 @@ function nativeCache(overrides: Partial<LocalWebViewCache> = {}): LocalWebViewCa
     documentsDirectory: '/documents',
     download: async () =>
       JSON.stringify({
+        bytesWritten: 12,
+        digests: { sha256: 'abc' },
         headers: { etag: '"one"' },
         responseUrl: 'https://example.com/app.js',
         status: 200,
+        wroteFile: true,
       }),
     exists: async () => true,
     hashFile: async () => '{"sha256":"abc"}',
@@ -39,9 +42,12 @@ describe('native cache adapter', () => {
   it('passes only request metadata to native and parses response metadata', async () => {
     const nativeDownload = vi.fn<LocalWebViewCache['download']>(async () =>
       JSON.stringify({
+        bytesWritten: 12,
+        digests: { sha256: 'abc' },
         headers: { etag: '"one"' },
         responseUrl: 'https://example.com/app.js',
         status: 200,
+        wroteFile: true,
       })
     );
     const cache = nativeCache({ download: nativeDownload });
@@ -50,6 +56,7 @@ describe('native cache adapter', () => {
     await expect(
       adapter.download({
         followRedirect: false,
+        hashAlgorithms: ['sha256'],
         headers: { 'If-None-Match': '"one"' },
         maxBytes: 1024,
         overwrite: true,
@@ -58,13 +65,17 @@ describe('native cache adapter', () => {
         url: 'https://example.com/app.js',
       })
     ).resolves.toEqual({
+      bytesWritten: 12,
+      digests: { sha256: 'abc' },
       headers: { etag: '"one"' },
       responseUrl: 'https://example.com/app.js',
       status: 200,
+      wroteFile: true,
     });
 
     const request = JSON.parse(nativeDownload.mock.calls[0]![1]) as Record<string, unknown>;
     expect(request).toEqual({
+      hashAlgorithms: ['sha256'],
       headers: { 'If-None-Match': '"one"' },
       maxBytes: 1024,
       path: '/documents/app.js',

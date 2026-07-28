@@ -95,6 +95,11 @@ ETag are downloaded and compared by SHA-256.
 If nothing changed, the active local generation stays in place. If anything changed, a new
 generation is built and committed atomically for the next mount.
 
+The cache data path avoids redundant work: required SHA-2 digests are computed while downloads are
+written, successful downloads return their exact byte count without a second `stat`, and 304
+responses do not create temporary files. iOS also reuses one networking session across the bounded
+revalidation batch. Persisted files are still fully hashed before a generation is activated.
+
 ### Offline start
 
 The last verified generation starts without contacting the origin. A failed refresh never

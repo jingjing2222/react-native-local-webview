@@ -129,6 +129,23 @@ await clearLocalWebViewCache(url);
 
 Storage and networking are always provided by the built-in Nitro runtime.
 
+### Cache data path
+
+| Path                  | Redundant work removed                                                 |
+| --------------------- | ---------------------------------------------------------------------- |
+| Successful download   | One complete post-download file read for SHA-2, plus one `stat`        |
+| HTTP 304 revalidation | Temporary-file creation, existence check, and removal                  |
+| iOS resource batch    | Per-resource `URLSession`; one reusable session keeps connection pools |
+| Large native streams  | 8 KiB Android copy loops and per-callback iOS file writes              |
+
+The native downloader computes the required SHA-2 digests while response bytes
+are being written. Android and iOS batch file I/O in 256 KiB chunks. This
+changes where the same integrity work happens; it does not skip it.
+
+Warm activation still reads and hashes every persisted payload before serving
+it. This integrity check is intentional; the optimizations above do not replace
+it with timestamps or cached metadata.
+
 ## Direct baseline
 
 The same native component can load a URL without durable mirroring:

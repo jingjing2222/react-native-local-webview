@@ -26,6 +26,7 @@ private enum LocalWebViewCacheError: Error, LocalizedError {
 }
 
 private struct LocalWebViewDownloadRequest: Decodable {
+  let hashAlgorithms: [String]?
   let headers: [String: String]?
   let maxBytes: Int64?
   let path: String
@@ -34,9 +35,12 @@ private struct LocalWebViewDownloadRequest: Decodable {
 }
 
 private struct LocalWebViewDownloadResponse: Encodable {
+  let bytesWritten: Int64
+  let digests: [String: String]?
   let headers: [String: String]
   let responseUrl: String
   let status: Int
+  let wroteFile: Bool
 }
 
 private func cacheFileURL(_ path: String) -> URL {
@@ -57,32 +61,174 @@ private func hexadecimal<D: Digest>(_ digest: D) -> String {
   digest.map { String(format: "%02x", $0) }.joined()
 }
 
-private final class LocalWebViewDownloadDelegate: NSObject, URLSessionDataDelegate {
-  private weak var owner: HybridLocalWebViewCache?
-  private let destination: URL
-  private var failure: Error?
-  private var fileHandle: FileHandle?
-  private let maximumBytes: Int64?
-  private let promise: Promise<String>
-  private var receivedBytes: Int64 = 0
-  private var response: HTTPURLResponse?
-  private let requestId: String
-  private let sourceUrl: String
+private let downloadWriteBufferBytes = 256 * 1024
+
+private final class LocalWebViewDownloadContext {
+  let destination: URL
+  var failure: Error?
+  var fileHandle: FileHandle?
+  let maximumBytes: Int64?
+  var pendingData = Data()
+  let promise: Promise<String>
+  var receivedBytes: Int64 = 0
+  var response: HTTPURLResponse?
+  var sha256: SHA256?
+  var sha384: SHA384?
+  var sha512: SHA512?
+  let requestId: String
+  let sourceUrl: String
+  var timeoutWorkItem: DispatchWorkItem?
+  var wroteFile = false
 
   init(
-    owner: HybridLocalWebViewCache,
     destination: URL,
+    hashAlgorithms: [String],
     maximumBytes: Int64?,
     promise: Promise<String>,
     requestId: String,
     sourceUrl: String
   ) {
-    self.owner = owner
     self.destination = destination
     self.maximumBytes = maximumBytes
     self.promise = promise
     self.requestId = requestId
+    let requested = Set(hashAlgorithms)
+    sha256 = requested.contains("sha256") ? SHA256() : nil
+    sha384 = requested.contains("sha384") ? SHA384() : nil
+    sha512 = requested.contains("sha512") ? SHA512() : nil
     self.sourceUrl = sourceUrl
+    pendingData.reserveCapacity(downloadWriteBufferBytes)
+  }
+
+  func flushPendingData() throws {
+    guard !pendingData.isEmpty else { return }
+    updateDigests(with: pendingData)
+    try fileHandle?.write(contentsOf: pendingData)
+    pendingData.removeAll(keepingCapacity: true)
+  }
+
+  func updateDigests(with data: Data) {
+    sha256?.update(data: data)
+    sha384?.update(data: data)
+    sha512?.update(data: data)
+  }
+
+  func finalizeDigests() -> [String: String]? {
+    var result = [String: String]()
+    if let digest = sha256?.finalize() { result["sha256"] = hexadecimal(digest) }
+    if let digest = sha384?.finalize() { result["sha384"] = hexadecimal(digest) }
+    if let digest = sha512?.finalize() { result["sha512"] = hexadecimal(digest) }
+    return result.isEmpty ? nil : result
+  }
+}
+
+private final class LocalWebViewDownloadClient: NSObject, URLSessionDataDelegate {
+  private var activeTasks = [String: URLSessionDataTask]()
+  private var contexts = [Int: LocalWebViewDownloadContext]()
+  private let lock = NSLock()
+  private let sessionDelegateQueue: OperationQueue
+  private lazy var session: URLSession = {
+    let configuration = URLSessionConfiguration.default
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.urlCache = nil
+    return URLSession(
+      configuration: configuration,
+      delegate: self,
+      delegateQueue: sessionDelegateQueue
+    )
+  }()
+
+  override init() {
+    sessionDelegateQueue = OperationQueue()
+    sessionDelegateQueue.maxConcurrentOperationCount = 1
+    sessionDelegateQueue.name = "react-native-local-webview.downloads"
+    super.init()
+  }
+
+  func download(
+    requestId: String,
+    request: LocalWebViewDownloadRequest,
+    url: URL
+  ) -> Promise<String> {
+    let promise = Promise<String>()
+    let context = LocalWebViewDownloadContext(
+      destination: cacheFileURL(request.path),
+      hashAlgorithms: request.hashAlgorithms ?? [],
+      maximumBytes: request.maxBytes,
+      promise: promise,
+      requestId: requestId,
+      sourceUrl: request.url
+    )
+    var urlRequest = URLRequest(url: url)
+    urlRequest.httpMethod = "GET"
+    urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+    urlRequest.timeoutInterval = request.timeoutMs / 1000
+    urlRequest.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+    request.headers?.forEach { urlRequest.setValue($0.value, forHTTPHeaderField: $0.key) }
+    let task = session.dataTask(with: urlRequest)
+    let timeoutWorkItem = DispatchWorkItem { [weak self] in
+      self?.failAndCancel(
+        requestId: requestId,
+        error: URLError(.timedOut)
+      )
+    }
+    context.timeoutWorkItem = timeoutWorkItem
+
+    lock.lock()
+    let existing = activeTasks.updateValue(task, forKey: requestId)
+    contexts[task.taskIdentifier] = context
+    lock.unlock()
+    existing?.cancel()
+
+    DispatchQueue.global(qos: .utility).asyncAfter(
+      deadline: .now() + request.timeoutMs / 1000,
+      execute: timeoutWorkItem
+    )
+    task.resume()
+    return promise
+  }
+
+  func cancel(requestId: String) {
+    lock.lock()
+    let task = activeTasks[requestId]
+    lock.unlock()
+    task?.cancel()
+  }
+
+  private func context(for task: URLSessionTask) -> LocalWebViewDownloadContext? {
+    lock.lock()
+    let context = contexts[task.taskIdentifier]
+    lock.unlock()
+    return context
+  }
+
+  private func failAndCancel(requestId: String, error: Error) {
+    lock.lock()
+    let task = activeTasks[requestId]
+    if let task, let context = contexts[task.taskIdentifier], context.failure == nil {
+      context.failure = error
+    }
+    lock.unlock()
+    task?.cancel()
+  }
+
+  private func fail(_ context: LocalWebViewDownloadContext, with error: Error) {
+    lock.lock()
+    if context.failure == nil {
+      context.failure = error
+    }
+    lock.unlock()
+  }
+
+  private func takeContext(for task: URLSessionTask) -> LocalWebViewDownloadContext? {
+    lock.lock()
+    let context = contexts.removeValue(forKey: task.taskIdentifier)
+    if let context, activeTasks[context.requestId]?.taskIdentifier == task.taskIdentifier {
+      activeTasks.removeValue(forKey: context.requestId)
+    }
+    context?.timeoutWorkItem?.cancel()
+    lock.unlock()
+    return context
   }
 
   func urlSession(
@@ -101,55 +247,82 @@ private final class LocalWebViewDownloadDelegate: NSObject, URLSessionDataDelega
     didReceive response: URLResponse,
     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
   ) {
+    guard let context = context(for: dataTask) else {
+      completionHandler(.cancel)
+      return
+    }
     guard let response = response as? HTTPURLResponse else {
-      failure = LocalWebViewCacheError.nonHTTPResponse
+      fail(context, with: LocalWebViewCacheError.nonHTTPResponse)
       completionHandler(.cancel)
       return
     }
 
-    self.response = response
+    context.response = response
     let declaredBytes = response.expectedContentLength
-    if let maximumBytes, declaredBytes >= 0, declaredBytes > maximumBytes {
-      failure = LocalWebViewCacheError.responseTooLarge(
-        url: sourceUrl,
-        maximum: maximumBytes,
-        observed: declaredBytes
+    if let maximumBytes = context.maximumBytes,
+      declaredBytes >= 0,
+      declaredBytes > maximumBytes
+    {
+      fail(
+        context,
+        with: LocalWebViewCacheError.responseTooLarge(
+          url: context.sourceUrl,
+          maximum: maximumBytes,
+          observed: declaredBytes
+        )
       )
       completionHandler(.cancel)
       return
     }
 
+    let writesFile = (200..<300).contains(response.statusCode)
+    guard writesFile else {
+      completionHandler(.allow)
+      return
+    }
+
     do {
-      try ensureCacheParent(of: destination)
-      try? FileManager.default.removeItem(at: destination)
-      guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
+      try ensureCacheParent(of: context.destination)
+      guard FileManager.default.createFile(atPath: context.destination.path, contents: nil) else {
         throw CocoaError(.fileWriteUnknown)
       }
-      fileHandle = try FileHandle(forWritingTo: destination)
+      context.fileHandle = try FileHandle(forWritingTo: context.destination)
+      context.wroteFile = true
       completionHandler(.allow)
     } catch {
-      failure = error
+      fail(context, with: error)
       completionHandler(.cancel)
     }
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    let nextCount = receivedBytes + Int64(data.count)
-    if let maximumBytes, nextCount > maximumBytes {
-      failure = LocalWebViewCacheError.responseTooLarge(
-        url: sourceUrl,
-        maximum: maximumBytes,
-        observed: nextCount
+    guard let context = context(for: dataTask) else {
+      dataTask.cancel()
+      return
+    }
+    let nextCount = context.receivedBytes + Int64(data.count)
+    if let maximumBytes = context.maximumBytes, nextCount > maximumBytes {
+      fail(
+        context,
+        with: LocalWebViewCacheError.responseTooLarge(
+          url: context.sourceUrl,
+          maximum: maximumBytes,
+          observed: nextCount
+        )
       )
       dataTask.cancel()
       return
     }
 
+    context.receivedBytes = nextCount
+    guard context.wroteFile else { return }
     do {
-      try fileHandle?.write(contentsOf: data)
-      receivedBytes = nextCount
+      context.pendingData.append(data)
+      if context.pendingData.count >= downloadWriteBufferBytes {
+        try context.flushPendingData()
+      }
     } catch {
-      failure = error
+      fail(context, with: error)
       dataTask.cancel()
     }
   }
@@ -159,20 +332,31 @@ private final class LocalWebViewDownloadDelegate: NSObject, URLSessionDataDelega
     task: URLSessionTask,
     didCompleteWithError error: Error?
   ) {
-    try? fileHandle?.close()
-    fileHandle = nil
-    owner?.finishDownload(requestId)
-    session.finishTasksAndInvalidate()
+    guard let context = takeContext(for: task) else { return }
+    var terminalError = context.failure ?? error
+    if terminalError == nil {
+      do {
+        try context.flushPendingData()
+      } catch {
+        terminalError = error
+      }
+    }
+    try? context.fileHandle?.close()
+    context.fileHandle = nil
 
-    if let terminalError = failure ?? error {
-      try? FileManager.default.removeItem(at: destination)
-      promise.reject(withError: terminalError)
+    if let terminalError {
+      if context.wroteFile {
+        try? FileManager.default.removeItem(at: context.destination)
+      }
+      context.promise.reject(withError: terminalError)
       return
     }
 
-    guard let response else {
-      try? FileManager.default.removeItem(at: destination)
-      promise.reject(withError: LocalWebViewCacheError.nonHTTPResponse)
+    guard let response = context.response else {
+      if context.wroteFile {
+        try? FileManager.default.removeItem(at: context.destination)
+      }
+      context.promise.reject(withError: LocalWebViewCacheError.nonHTTPResponse)
       return
     }
 
@@ -184,41 +368,36 @@ private final class LocalWebViewDownloadDelegate: NSObject, URLSessionDataDelega
         }
       }
       let result = LocalWebViewDownloadResponse(
+        bytesWritten: context.wroteFile ? context.receivedBytes : 0,
+        digests: context.wroteFile ? context.finalizeDigests() : nil,
         headers: headers,
-        responseUrl: response.url?.absoluteString ?? sourceUrl,
-        status: response.statusCode
+        responseUrl: response.url?.absoluteString ?? context.sourceUrl,
+        status: response.statusCode,
+        wroteFile: context.wroteFile
       )
       let data = try JSONEncoder().encode(result)
       guard let json = String(data: data, encoding: .utf8) else {
         throw CocoaError(.fileReadInapplicableStringEncoding)
       }
-      promise.resolve(withResult: json)
+      context.promise.resolve(withResult: json)
     } catch {
-      try? FileManager.default.removeItem(at: destination)
-      promise.reject(withError: error)
+      if context.wroteFile {
+        try? FileManager.default.removeItem(at: context.destination)
+      }
+      context.promise.reject(withError: error)
     }
   }
 }
 
 final class HybridLocalWebViewCache: HybridLocalWebViewCacheSpec {
-  private struct ActiveDownload {
-    let session: URLSession
-    let task: URLSessionDataTask
-  }
-
-  private var activeDownloads = [String: ActiveDownload]()
-  private let downloadLock = NSLock()
+  private let downloadClient = LocalWebViewDownloadClient()
 
   var documentsDirectory: String {
     FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
   }
 
   func cancelDownload(requestId: String) throws {
-    downloadLock.lock()
-    let download = activeDownloads[requestId]
-    downloadLock.unlock()
-    download?.task.cancel()
-    download?.session.invalidateAndCancel()
+    downloadClient.cancel(requestId: requestId)
   }
 
   func copyFile(source: String, destination: String) throws -> Promise<Void> {
@@ -238,51 +417,17 @@ final class HybridLocalWebViewCache: HybridLocalWebViewCacheSpec {
       let scheme = url.scheme?.lowercased(),
       scheme == "http" || scheme == "https",
       request.timeoutMs > 0,
-      request.maxBytes.map({ $0 >= 0 }) ?? true
+      request.maxBytes.map({ $0 >= 0 }) ?? true,
+      Set(request.hashAlgorithms ?? []).isSubset(of: ["sha256", "sha384", "sha512"])
     else {
       return Promise.rejected(withError: LocalWebViewCacheError.invalidRequest)
     }
 
-    let promise = Promise<String>()
-    let delegate = LocalWebViewDownloadDelegate(
-      owner: self,
-      destination: cacheFileURL(request.path),
-      maximumBytes: request.maxBytes,
-      promise: promise,
+    return downloadClient.download(
       requestId: requestId,
-      sourceUrl: request.url
+      request: request,
+      url: url
     )
-    let configuration = URLSessionConfiguration.default
-    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    configuration.timeoutIntervalForRequest = request.timeoutMs / 1000
-    configuration.timeoutIntervalForResource = request.timeoutMs / 1000
-    configuration.urlCache = nil
-    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-    var urlRequest = URLRequest(url: url)
-    urlRequest.httpMethod = "GET"
-    urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
-    urlRequest.timeoutInterval = request.timeoutMs / 1000
-    urlRequest.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-    request.headers?.forEach { urlRequest.setValue($0.value, forHTTPHeaderField: $0.key) }
-    let task = session.dataTask(with: urlRequest)
-
-    downloadLock.lock()
-    if let existing = activeDownloads.updateValue(
-      ActiveDownload(session: session, task: task),
-      forKey: requestId
-    ) {
-      existing.task.cancel()
-      existing.session.invalidateAndCancel()
-    }
-    downloadLock.unlock()
-    task.resume()
-    return promise
-  }
-
-  fileprivate func finishDownload(_ requestId: String) {
-    downloadLock.lock()
-    activeDownloads.removeValue(forKey: requestId)
-    downloadLock.unlock()
   }
 
   func exists(path: String) throws -> Promise<Bool> {

@@ -558,9 +558,15 @@ async function canonicalFileHashes(
   algorithms: readonly ('sha256' | 'sha384' | 'sha512')[]
 ): Promise<Partial<Record<'sha256' | 'sha384' | 'sha512', string>>> {
   const uniqueAlgorithms = [...new Set(algorithms)];
-  const digests = await cacheAdapter.hashFile(path, uniqueAlgorithms);
+  return canonicalHashes(await cacheAdapter.hashFile(path, uniqueAlgorithms), uniqueAlgorithms);
+}
+
+function canonicalHashes(
+  digests: Partial<Record<'sha256' | 'sha384' | 'sha512', string>>,
+  algorithms: readonly ('sha256' | 'sha384' | 'sha512')[]
+): Partial<Record<'sha256' | 'sha384' | 'sha512', string>> {
   const normalized: Partial<Record<'sha256' | 'sha384' | 'sha512', string>> = {};
-  for (const algorithm of uniqueAlgorithms) {
+  for (const algorithm of algorithms) {
     const digest = digests[algorithm];
     const expectedLength = algorithm === 'sha256' ? 64 : algorithm === 'sha384' ? 96 : 128;
     if (
@@ -593,14 +599,18 @@ async function downloadWithoutRedirects(
   policy: ResolvedSecurityPolicy,
   sameOriginRedirectsOnly: boolean,
   maxBytes?: number,
+  hashAlgorithms?: readonly ('sha256' | 'sha384' | 'sha512')[],
   signal?: AbortSignal
 ): Promise<{
+  bytesWritten?: number;
+  digests?: Partial<Record<'sha256' | 'sha384' | 'sha512', string>>;
   documentFragmentInherited: boolean;
   documentUrl: string;
   finalUrl: string;
   headers: Record<string, string> | undefined;
   redirected: boolean;
   status: number;
+  wroteFile?: boolean;
 }> {
   let currentDocumentUrl = assertTrustedAssetUrl(url, policy).toString();
   let currentUrl = canonicalResourceUrl(currentDocumentUrl);
@@ -613,6 +623,7 @@ async function downloadWithoutRedirects(
     visited.add(currentUrl);
     const info = await cacheAdapter.download({
       followRedirect: false,
+      hashAlgorithms,
       headers: {
         ...headers,
         ...(new URL(currentUrl).origin === policy.entryOrigin
@@ -639,12 +650,15 @@ async function downloadWithoutRedirects(
         throw new Error(`Entry redirect target changes origin: ${finalUrl.origin}`);
       }
       return {
+        bytesWritten: info.bytesWritten,
+        digests: info.digests,
         documentFragmentInherited: documentFragmentInherited && !responseUrl.includes('#'),
         documentUrl: finalDocumentUrl.toString(),
         finalUrl: canonicalResourceUrl(finalUrl.toString()),
         headers: responseHeaders,
         redirected: redirects > 0 || canonicalResourceUrl(responseUrl) !== currentUrl,
         status: info.status,
+        wroteFile: info.wroteFile,
       };
     }
     if (redirects >= MAX_REDIRECTS) {
@@ -661,7 +675,11 @@ async function downloadWithoutRedirects(
     documentFragmentInherited = documentFragmentInherited && !location.includes('#');
     currentDocumentUrl = nextDocumentUrl;
     currentUrl = canonicalResourceUrl(validatedTarget.toString());
-    if (await cacheAdapter.exists(temporaryPath)) await cacheAdapter.remove(temporaryPath);
+    if (info.wroteFile === true) {
+      await cacheAdapter.remove(temporaryPath);
+    } else if (info.wroteFile === undefined && (await cacheAdapter.exists(temporaryPath))) {
+      await cacheAdapter.remove(temporaryPath);
+    }
   }
 }
 
@@ -692,7 +710,21 @@ async function downloadResource(
 ): Promise<DownloadResult> {
   throwIfAborted(signal);
   const temporaryPath = `${stagingDirectory}/download-${Date.now()}-${temporaryFileSequence++}`;
+  const hashAlgorithms: Array<'sha256' | 'sha384' | 'sha512'> = ['sha256'];
+  if (delivery === 'bridge' && completeBridgeIntegrity) {
+    hashAlgorithms.push('sha384', 'sha512');
+  } else {
+    const strongestIntegrity = strongestIntegrityAlgorithm(integrityMetadata);
+    if (strongestIntegrity && strongestIntegrity !== 'sha256')
+      hashAlgorithms.push(strongestIntegrity);
+  }
   let keepFile = false;
+  let completedDownload:
+    | {
+        bytesWritten?: number;
+        wroteFile?: boolean;
+      }
+    | undefined;
   try {
     const result = await downloadWithoutRedirects(
       cacheAdapter,
@@ -706,8 +738,10 @@ async function downloadResource(
       policy,
       sameOriginRedirectsOnly,
       maxDownloadBytes,
+      hashAlgorithms,
       signal
     );
+    completedDownload = result;
     throwIfAborted(signal);
     const contentSecurityPolicy = header(result.headers, 'content-security-policy');
     const contentSecurityPolicyReportOnly = header(
@@ -740,22 +774,22 @@ async function downloadResource(
         `Unsupported encoded response (${contentEncoding}) for ${url}. Serve identity bytes or use the WebGL build's decompression-fallback artifact.`
       );
     }
-    const file = await cacheAdapter.stat(temporaryPath);
-    throwIfAborted(signal);
-    const size = Number(file.size);
+    if (result.wroteFile === false) {
+      throw new Error(`Native download did not create a file for HTTP ${result.status}: ${url}`);
+    }
+    const size =
+      result.bytesWritten === undefined
+        ? Number((await cacheAdapter.stat(temporaryPath)).size)
+        : result.bytesWritten;
     if (!Number.isSafeInteger(size) || size < 0) {
       throw new Error(`Native download reported an invalid byte size for ${url}`);
     }
+    throwIfAborted(signal);
     accountDownloadedBytes?.(size, url, delivery);
-    const hashAlgorithms: Array<'sha256' | 'sha384' | 'sha512'> = ['sha256'];
-    if (delivery === 'bridge' && completeBridgeIntegrity) {
-      hashAlgorithms.push('sha384', 'sha512');
-    } else {
-      const strongestIntegrity = strongestIntegrityAlgorithm(integrityMetadata);
-      if (strongestIntegrity && strongestIntegrity !== 'sha256')
-        hashAlgorithms.push(strongestIntegrity);
-    }
-    const hashes = await canonicalFileHashes(cacheAdapter, temporaryPath, hashAlgorithms);
+    const hashes =
+      result.digests === undefined
+        ? await canonicalFileHashes(cacheAdapter, temporaryPath, hashAlgorithms)
+        : canonicalHashes(result.digests, hashAlgorithms);
     throwIfAborted(signal);
     const sha256 = hashes.sha256!;
     const integrity: SubresourceIntegrityDigests = {
@@ -804,8 +838,16 @@ async function downloadResource(
       status: 'downloaded',
     };
   } finally {
-    if (!keepFile && (await cacheAdapter.exists(temporaryPath)))
-      await cacheAdapter.remove(temporaryPath);
+    if (!keepFile) {
+      if (completedDownload?.wroteFile === true) {
+        await cacheAdapter.remove(temporaryPath);
+      } else if (
+        completedDownload?.wroteFile === undefined &&
+        (await cacheAdapter.exists(temporaryPath))
+      ) {
+        await cacheAdapter.remove(temporaryPath);
+      }
+    }
   }
 }
 

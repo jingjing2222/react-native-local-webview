@@ -38,6 +38,7 @@ export function createNativeCacheAdapter(cache: LocalWebViewCache): LocalWebView
         const response = await cache.download(
           requestId,
           JSON.stringify({
+            hashAlgorithms: options.hashAlgorithms,
             headers: options.headers,
             maxBytes: options.maxBytes,
             path: options.path,
