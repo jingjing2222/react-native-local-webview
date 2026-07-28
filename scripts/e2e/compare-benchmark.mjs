@@ -166,7 +166,7 @@ const markdown = [
   '',
   `- Origin: \`${local.origin}\``,
   `- Suite: \`${localCompletion.suite}\``,
-  '- Baseline: `react-native-webview` loading each remote HTTPS URL directly with its normal HTTP cache.',
+  '- Baseline: the built-in native WebView loading each remote HTTPS URL directly with its normal HTTP cache.',
   '- Candidate: `NativeLocalWebView`; a cache miss displays the same remote HTTPS document immediately while durable installation continues in the background. Later mounts use the verified local generation.',
   `- Direct WebView peak RSS: ${(remoteMemory.rssKib / 1024).toFixed(1)} MiB`,
   `- Nitro local peak RSS: ${(localMemory.rssKib / 1024).toFixed(1)} MiB (${delta(

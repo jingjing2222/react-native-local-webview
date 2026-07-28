@@ -1,160 +1,221 @@
 # react-native-local-webview
 
 [![CI](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml/badge.svg)](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/react-native-local-webview.svg)](https://www.npmjs.com/package/react-native-local-webview)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Node 24.15.0](https://img.shields.io/badge/node-24.15.0-339933.svg)](./mise.toml)
 
 > Run CSR and Unity WebGL bundles from durable local storage without giving up
 > their HTTPS origin.
 
-`LocalWebView` is a Nitro Hybrid View backed by `WKWebView` on iOS and
-`android.webkit.WebView` on Android. It mirrors a site's static graph into
-app-owned storage, then serves verified files natively at their original HTTPS
-URLs. On a first install it opens the remote page immediately, waits for the
-document load event (with a bounded fallback), and builds the durable mirror in
-the background. It never replaces the live document mid-session. The next mount
-uses the verified local generation.
+`LocalWebView` is a Nitro-powered iOS and Android WebView runtime for apps that
+need large web bundles to keep working after the operating system evicts its
+normal HTTP cache.
 
-The page keeps its real `location.origin`, browser history, cookies, CORS, and
-ordinary runtime networking. Large `.data` and `.wasm` responses never travel
-through the React Native bridge.
+It opens the real remote page immediately on a cold install, saves a complete
+verified generation in the background, and starts from local files on later
+launches. The page still sees its original HTTPS URL, origin, cookies, CORS,
+History API, workers, WASM, and Range requests.
 
 ```text
 first mount ──▶ remote HTTPS page ──▶ visible immediately
-        └────▶ validate + mirror ──▶ durable app storage
+        └────▶ native download + hash ──▶ durable generation
 
-later mount ──▶ verified local generation at the original HTTPS URLs
-                                      │
-                          GET/HEAD ───┴── local file stream
-                          everything else ── network
+warm/offline mount ──▶ verified local files ──▶ original HTTPS browsing context
 ```
+
+Large response bodies, file copies, ranges, and SHA-2 hashing stay native. They
+do not cross the React Native bridge.
 
 ## Install
 
 ```sh
-yarn add react-native-local-webview react-native-nitro-modules react-native-webview
+yarn add react-native-local-webview react-native-nitro-modules
 cd ios && pod install
 ```
 
-The package uses the `react-native-webview` 13.16.0 public TypeScript API as its
-compatibility baseline. Its peer range is `*`; the host app owns the version.
+No `react-native-webview`, Blob utility, or filesystem adapter is required.
 
-Install one filesystem provider in the app. For example:
+Requirements:
 
-```sh
-yarn add react-native-blob-util
-```
+- React Native New Architecture
+- iOS 16.4+
+- Android API 24+
+
+## Use
 
 ```tsx
-import { useMemo } from 'react';
-import ReactNativeBlobUtil from 'react-native-blob-util';
-import { createReactNativeBlobUtilCacheAdapter, LocalWebView } from 'react-native-local-webview';
+import { LocalWebView } from 'react-native-local-webview';
 
 export function Game() {
-  const cacheAdapter = useMemo(
-    () => createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil),
-    []
-  );
-
   return (
     <LocalWebView
-      cacheAdapter={cacheAdapter}
-      virtualUrl="https://book.jingjing2222.com/"
-      cachePolicy={{ maxBytes: 800 * 1024 * 1024, maxGenerations: 1 }}
+      source={{ uri: 'https://book.jingjing2222.com/' }}
+      cachePolicy={{
+        maxBytes: 800 * 1024 * 1024,
+        maxGenerations: 2,
+        maxInlineBytes: 4 * 1024 * 1024,
+      }}
+      onBundleStored={(bundle) => {
+        console.log('durable generation', bundle.generationId);
+      }}
       style={{ flex: 1 }}
     />
   );
 }
 ```
 
-Presets also exist for `react-native-fs`, `react-native-file-access`, and
-`expo-file-system`. The provider is supplied by the application; this package
-does not force a filesystem dependency.
+`virtualUrl="https://…"` is also available for components dedicated to one
+entry. Do not pass `virtualUrl` and `source` together.
 
-## What the native runtime changes
+## Why this is different from WebView cache
 
-- One Nitro prop update transfers configuration and the verified asset
-  manifest.
-- Native code opens and range-streams local files directly.
-- Navigation, message, progress, error, download, and scroll callbacks cross a
-  Nitro JSI callback, not the legacy React Native bridge.
-- `fetch`, XHR, workers, Unity loaders, and WASM continue to request normal
-  HTTPS URLs.
-- URLs absent from the verified inventory, and non-GET/HEAD requests, use the
-  network. Android leaves them on WebView's ordinary path; the iOS private
-  protocol hook forwards them through native `URLSession` and preserves
-  same-origin asynchronous fetch/XHR bodies without using the React Native
-  bridge.
+|                 | Normal WebView cache         | LocalWebView                           |
+| --------------- | ---------------------------- | -------------------------------------- |
+| Eviction        | Controlled by the OS         | App-owned persistent files             |
+| Offline release | Independent cached responses | Atomic verified generation             |
+| First install   | Remote page                  | Same remote page, mirror in background |
+| Warm start      | Cache policy dependent       | Verified local generation              |
+| Page origin     | HTTPS                        | Same HTTPS origin                      |
+| Large-file path | WebView network stack        | Native file stream                     |
+| Revalidation    | Browser-defined              | Per-resource ETag and SHA-256          |
+| Rollback        | None                         | Previous complete generation           |
 
-`LocalWebView` accepts the applicable iOS and Android props, events, and ten
-imperative methods from `react-native-webview@13.16.0`. A supplied
-`nativeConfig.component` intentionally selects the compatible
-`react-native-webview` fallback because replacing the native host also replaces
-the Nitro runtime.
+This runtime is for durable availability and predictable release ownership.
+It is not expected to beat an already-hot WebView HTTP cache on every page.
 
-## When it pays off
+## Unity WebGL and CSR support
 
-This runtime optimizes for durable offline availability, not every cache-hot
-launch. In one sequential Release run on an iPhone 17 Pro iOS 26.5 simulator
-hosted by an Apple M4 Mac mini:
+The graph collector parses production HTML, CSS, and JavaScript and handles:
 
-| Unity graph | Direct first | Local first | Direct warm | Local warm | Local offline |
-| ----------- | -----------: | ----------: | ----------: | ---------: | ------------: |
-| 50 MiB      |       1.49 s |      1.48 s |      0.59 s |     2.19 s |        2.18 s |
-| 200 MiB     |       2.88 s |      2.92 s |      2.41 s |     2.83 s |        2.82 s |
-| 500 MiB     |       5.59 s |      7.46 s |      5.00 s |     4.13 s |        4.12 s |
+- module scripts and static or dynamic imports
+- stylesheets, CSS imports, `url(...)`, `src`, and `srcset`
+- preload and module-preload resources
+- Web Workers and worker module graphs
+- WebAssembly
+- Unity loader, framework, `.data`, and `.wasm` files
 
-Direct WebView timed out after 30 seconds in every offline phase. Local warm and
-offline phases transferred zero network bytes. The 500 MiB warm graph was 17%
-faster locally, while the 50 MiB cache-hot graph was about 3.7 times slower.
-First install uses roughly twice the network traffic because the visible page
-and background mirror download independently.
+Large artifacts remain as files. Native interception serves complete and
+single-range responses directly to WebKit or Android WebView. Runtime API
+requests that are not part of the mirrored graph continue through the real
+HTTPS network.
 
-These numbers are a regression snapshot, not a physical-device or statistically
-stable product benchmark. See the [benchmark design, memory results, and
-commands](./e2e/README.md) before making a production decision.
+## Cache lifecycle
 
-## Important iOS status
+On a cold install, the current remote document becomes visible before the
+mirror completes. `onBundleStored` marks the point at which the new generation
+is durable.
 
-iOS HTTPS interception uses the private
-`WKBrowsingContextController registerSchemeForCustomProtocol:` SPI. It works in
-the simulator and can work on physical devices, but private API use can cause
-App Store rejection and is not a stable Apple contract. Treat the current iOS
-implementation as a production benchmark/PoC unless your distribution policy
-explicitly permits that risk.
+On a warm start, the verified local generation is shown first. Every resource
+with an ETag is conditionally requested. A resource without an ETag is
+downloaded and compared by SHA-256. Any change creates a new generation; a
+failed refresh leaves the active generation intact.
 
-Android uses the public `WebViewClient.shouldInterceptRequest` API.
+Useful controls:
 
-See the [package guide](./packages/react-native-local-webview/README.md) for
-cache behavior, Unity WebGL details, API compatibility, security boundaries,
-and E2E commands.
+```ts
+import {
+  cacheDirectoryForOrigin,
+  clearLocalWebViewCache,
+  resolveWebBundle,
+  rollbackWebBundle,
+} from 'react-native-local-webview';
+
+const url = 'https://game.example.com/';
+const directory = cacheDirectoryForOrigin(url);
+
+await resolveWebBundle({ virtualUrl: url, forceRefresh: true });
+await rollbackWebBundle(directory);
+await clearLocalWebViewCache(url);
+```
+
+Storage and networking are always provided by the built-in Nitro runtime.
+
+## Direct baseline
+
+The same native component can load a URL without durable mirroring:
+
+```tsx
+<LocalWebView durableCacheEnabled={false} source={{ uri: 'https://game.example.com/' }} />
+```
+
+The E2E benchmark uses this as its direct WebView baseline. Both sides therefore
+share the same WebView implementation and differ only in response delivery.
+
+POST requests, request bodies, custom request headers, non-HTTPS URLs, and
+inline HTML use direct mode automatically.
+
+## React Native WebView compatibility
+
+The public props, events, and ten imperative methods track
+`react-native-webview@13.16.0`, but this package does not import or install it.
+The implementation uses `WKWebView` and `android.webkit.WebView` directly.
+
+`nativeConfig.props` can pass extra values to the built-in Nitro native view.
+Replacing the component through `nativeConfig.component` is intentionally not
+supported because it would bypass this runtime.
+
+## Security defaults
+
+- Only absolute HTTPS entries are mirrored.
+- Cross-origin assets require an explicit `trustedAssetOrigins` entry.
+- Redirects are validated one hop at a time.
+- Every cached file is checked against its manifest SHA-256 before activation.
+- Subresource Integrity is enforced when present.
+- Content Security Policy is preserved by default.
+
+`allowContentSecurityPolicyBypass` is available for content you own when
+removing CSP is an explicit product decision.
+
+## Benchmark matrix
+
+Comment `/e2e` on a same-repository pull request to run the macOS ARM64 runner:
+
+- 50 MiB, 200 MiB, and 500 MiB Unity graphs
+- cold install, warm start, and fully offline start
+- low-end and current Android emulators
+- iOS simulator host and WebKit process memory
+- 100, 500, and 1,000-resource all-304 revalidation
+- large files without ETags
+- CSP, cookies, Range fetches, workers, WASM, and real Unity startup
+
+Each platform produces a direct-vs-local report with page-ready time,
+background storage time, network bytes, 304 counts, offline availability, and
+peak memory.
+
+### Measured iOS baseline
+
+Before the cache data plane moved fully native, one sequential Release run on
+an iPhone 17 Pro iOS 26.5 simulator hosted by an Apple M4 Mac mini produced:
+
+| Unity graph | Direct first page | Local first page | Direct warm | Local warm | Local offline |
+| ----------- | ----------------: | ---------------: | ----------: | ---------: | ------------: |
+| 50 MiB      |            1.49 s |           1.48 s |      0.59 s |     2.19 s |        2.18 s |
+| 200 MiB     |            2.88 s |           2.92 s |      2.41 s |     2.83 s |        2.82 s |
+| 500 MiB     |            5.59 s |           7.46 s |      5.00 s |     4.13 s |        4.12 s |
+
+The direct runtime timed out after 30 seconds in every offline phase. The local
+runtime used zero network bytes for ETag warm and offline phases. First install
+used roughly twice the network bytes because the visible remote page and
+background durable mirror intentionally run together.
+
+This is the pre-migration regression baseline, not a claim about the current
+native-cache revision or physical-device performance. Run `/e2e` on this
+revision before making a production decision.
+
+See [the package guide](./packages/react-native-local-webview/README.md) for the
+complete API and [the E2E guide](./e2e/README.md) for benchmark mechanics.
 
 ## Development
 
-This is an Nx workspace:
-
-- [`packages/react-native-local-webview`](./packages/react-native-local-webview)
-  — the publishable package and native runtime;
-- [`examples/showcase`](./examples/showcase) — the React Native benchmark host;
-- [`e2e`](./e2e) — simulator and emulator fixtures.
-
 ```sh
 mise install
-corepack enable
-yarn install
+yarn install --immutable
 yarn check
-
-yarn e2e:props:android:latest
-yarn e2e:props:android:low
-yarn e2e:props:ios
-
-yarn e2e:compare:android:latest
-yarn e2e:compare:android:low
-yarn e2e:compare:ios
 ```
 
-Node.js 24.15.0 is pinned with mise. `tsdown` owns the JavaScript, declarations,
-and export map; `oxfmt` and type-aware `oxlint` own formatting and linting.
+The monorepo uses Node 24.15.0, mise, Nx, tsdown, oxlint, oxfmt, Vitest, and
+Changesets.
 
 ## License
 

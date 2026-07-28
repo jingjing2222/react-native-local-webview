@@ -1,5 +1,5 @@
 import type { ViewProps } from 'react-native';
-import type { WebViewProps } from 'react-native-webview';
+import type { WebViewProps } from './localWebViewTypes';
 
 export const SHARED_WEBVIEW_PROP_NAMES = [
   'source',

@@ -6,8 +6,8 @@ that commonly break when an HTTPS application is mirrored into local storage.
 
 Every production benchmark is an A/B run:
 
-- the baseline mounts the remote HTTPS URL directly in `react-native-webview`
-  and relies only on WebView's normal HTTP cache;
+- the baseline uses `LocalWebView` with durable mirroring disabled and relies
+  only on the native WebView's normal HTTP cache;
 - the candidate opens the remote page immediately on a cache miss, starts
   saving the same URL graph after document load, and uses the durable graph on
   later mounts through the Nitro-backed `NativeLocalWebView`.
@@ -57,10 +57,9 @@ The fixture server listens on loopback. CI exposes it only inside the runner's
 Tailscale network with `tailscale serve`, preserving a valid HTTPS origin without
 publishing the fixture to the internet.
 
-The showcase intentionally pins `react-native-blob-util` to `0.24.9`. Version
-`0.24.10` interrupts multi-buffer Android downloads in this workload, including the
-31 KiB Unity loader; the benchmark should not silently move past that known-bad
-version until the upstream regression is resolved.
+The candidate uses the built-in Nitro downloader, direct-to-file storage,
+native range reads, and native SHA-2 hashing. No external filesystem module is
+part of the benchmark data path.
 
 The benchmark is intentionally manual because a full A/B run downloads, hashes,
 revalidates, and streams several gigabytes. Raw results, memory samples, and
@@ -84,11 +83,12 @@ The iOS runtime uses private WebKit HTTPS protocol-registration SPI. These E2E
 results establish technical behavior on the tested simulator, not App Store
 eligibility.
 
-## Measured iOS snapshot
+## Measured iOS baseline
 
-The following is one sequential Release run on an iPhone 17 Pro iOS 26.5
-simulator hosted by an Apple M4 Mac mini. It is a regression snapshot, not a
-physical-device claim or a statistically stable product benchmark.
+The following predates the fully native cache data plane. It is one sequential
+Release run on an iPhone 17 Pro iOS 26.5 simulator hosted by an Apple M4 Mac
+mini, kept as a comparison baseline rather than a claim about the current
+revision, a physical device, or statistically stable product performance.
 
 | Unity graph | Direct first page | Local first page | Direct warm | Local warm | Local offline |
 | ----------- | ----------------: | ---------------: | ----------: | ---------: | ------------: |
@@ -106,4 +106,5 @@ runtime versus 215/1,130/1,344 MiB for direct WebView. Per-chunk autorelease poo
 and a 256 MiB/s producer bound kept the 500 MiB warm file-serving phase to
 369/1,000/1,368 MiB instead of enqueueing the whole payload into WebKit at local
 SSD speed. Use repeated physical-device runs before setting production latency
-or memory budgets.
+or memory budgets. Run `/e2e` on the current revision before comparing those
+budgets.

@@ -35,7 +35,7 @@ function scriptElement(markerName: string, source: string): HtmlElement {
 /**
  * Applies the final document policy and both runtime bridges with one HTML5
  * parse/serialize pass. This path runs on the React Native JS thread just
- * before handing the string to react-native-webview.
+ * before handing the string to the native WebView runtime.
  */
 export function prepareWebViewDocument(
   html: string,

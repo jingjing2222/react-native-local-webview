@@ -78,7 +78,6 @@
     "react": "19.2.3",
     "react-native": "0.85.0",
     "react-native-nitro-modules": "0.36.1",
-    "react-native-webview": "13.16.0",
     "react-test-renderer": "19.2.3",
     "tsdown": "0.22.14",
     "typescript": "6.0.3",
@@ -87,8 +86,7 @@
   "peerDependencies": {
     "react": "*",
     "react-native": "*",
-    "react-native-nitro-modules": "*",
-    "react-native-webview": "*"
+    "react-native-nitro-modules": "*"
   },
   "engines": {
     "node": ">=24.15.0"

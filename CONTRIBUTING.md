@@ -16,9 +16,9 @@ mise exec -- corepack yarn install --immutable
 `packages/react-native-local-webview/` contains the publishable TypeScript
 library. `examples/showcase/` contains the React Native application, and
 `e2e/` contains the production benchmark infrastructure. The library has no
-native project of its own. WebView is a peer dependency; filesystem and
-downloader behavior comes from a cache adapter. The showcase uses the included
-`createReactNativeBlobUtilCacheAdapter` preset.
+standalone native project; the showcase links its iOS and Android sources.
+WebView rendering, downloads, persistent files, ranges, and hashing come from
+the built-in Nitro runtime.
 
 ## Checks
 

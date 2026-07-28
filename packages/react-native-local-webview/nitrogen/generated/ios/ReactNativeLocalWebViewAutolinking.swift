@@ -23,4 +23,16 @@ public final class ReactNativeLocalWebViewAutolinking {
   public static func isNativeLocalWebViewRecyclable() -> Bool {
     return HybridLocalWebView.self is any RecyclableView.Type
   }
+
+  public static func createLocalWebViewCache() -> bridge.std__shared_ptr_HybridLocalWebViewCacheSpec_ {
+    let hybridObject = HybridLocalWebViewCache()
+    return { () -> bridge.std__shared_ptr_HybridLocalWebViewCacheSpec_ in
+      let __cxxWrapped = hybridObject.getCxxWrapper()
+      return __cxxWrapped.getCxxPart()
+    }()
+  }
+
+  public static func isLocalWebViewCacheRecyclable() -> Bool {
+    return HybridLocalWebViewCache.self is any RecyclableView.Type
+  }
 }

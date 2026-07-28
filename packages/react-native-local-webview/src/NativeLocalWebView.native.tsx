@@ -18,7 +18,6 @@ import {
 } from 'react-native';
 import { callback } from 'react-native-nitro-modules';
 import { URL } from 'react-native-url-polyfill';
-import { WebView as ReactNativeWebView, type WebViewProps } from 'react-native-webview';
 import type {
   FileDownloadEvent,
   ShouldStartLoadRequest,
@@ -36,15 +35,10 @@ import type {
   WebViewSource,
   WebViewSourceUri,
   WebViewTerminatedEvent,
-} from 'react-native-webview/lib/WebViewTypes';
-
-import {
-  LocalWebView as LegacyLocalWebView,
-  type LocalWebViewHandle as LegacyLocalWebViewHandle,
-} from './LocalWebView.native';
+  WebViewProps,
+} from './localWebViewTypes';
 import { historyStateFromMessage, type LocalWebViewHistoryState } from './historyState';
 import { HISTORY_BRIDGE_SCRIPT } from './installHistoryBridge';
-import type { LocalWebViewCacheAdapter } from './localWebViewCacheAdapter';
 import {
   cacheDirectoryForOrigin,
   readMirroredWebBundle,
@@ -54,6 +48,7 @@ import {
   type CachePolicy,
   type MirroredWebBundle,
 } from './mirrorWebBundle';
+import { getNativeCacheAdapter } from './nativeCacheAdapter';
 import { prepareNativeWebViewDocument } from './prepareWebViewDocument';
 import { NativeLocalWebViewHost, type NativeLocalWebViewHostRef } from './NativeLocalWebViewHost';
 import {
@@ -67,9 +62,9 @@ const BACKGROUND_WORK_SETTLE_MS = 3_000;
 const REMOTE_LOAD_INSTALL_TIMEOUT_MS = 10_000;
 const CUSTOM_PROP_NAMES = new Set([
   'allowContentSecurityPolicyBypass',
-  'cacheAdapter',
   'cacheDirectory',
   'cachePolicy',
+  'durableCacheEnabled',
   'forceRefresh',
   'onBundleError',
   'onBundleReady',
@@ -178,9 +173,14 @@ export type NativeLocalWebViewComponent = ReturnType<
 
 export type NativeLocalWebViewProps = Omit<WebViewProps, 'source'> & {
   allowContentSecurityPolicyBypass?: boolean;
-  cacheAdapter: LocalWebViewCacheAdapter;
   cacheDirectory?: string;
   cachePolicy?: CachePolicy;
+  /**
+   * Disable durable bundle mirroring and load the source directly.
+   *
+   * @default true
+   */
+  durableCacheEnabled?: boolean;
   forceRefresh?: boolean;
   onBundleError?: (error: Error) => void;
   onBundleReady?: (bundle: MirroredWebBundle) => void;
@@ -309,10 +309,10 @@ const NativeLocalWebViewImplementation = forwardRef<
 >(function NativeLocalWebView(props, forwardedRef) {
   const {
     allowContentSecurityPolicyBypass = false,
-    cacheAdapter,
     cacheDirectory,
     cachePolicy,
     containerStyle,
+    durableCacheEnabled = true,
     forceRefresh = false,
     renderError,
     renderLoading,
@@ -323,6 +323,7 @@ const NativeLocalWebViewImplementation = forwardRef<
     trustedAssetOrigins,
     virtualUrl,
   } = props;
+  const cacheAdapter = getNativeCacheAdapter();
   if (virtualUrl !== undefined && source !== undefined) {
     throw new Error('Provide either virtualUrl or source, not both');
   }
@@ -580,18 +581,24 @@ const NativeLocalWebViewImplementation = forwardRef<
   const sourceIsUri = source !== undefined && 'uri' in source;
   const sourceIsEmpty = source === undefined && virtualUrl === undefined;
   const usesDirectSource =
-    sourceIsUri &&
-    ((source.method !== undefined && source.method.toUpperCase() !== 'GET') ||
-      source.body !== undefined ||
-      source.headers !== undefined ||
-      !source.uri.startsWith('https://'));
+    (sourceIsUri &&
+      (!durableCacheEnabled ||
+        (source.method !== undefined && source.method.toUpperCase() !== 'GET') ||
+        source.body !== undefined ||
+        source.headers !== undefined ||
+        !source.uri.startsWith('https://'))) ||
+    (!durableCacheEnabled && virtualUrl !== undefined);
   const effectiveVirtualUrl =
     sourceIsHtml || sourceIsEmpty || usesDirectSource
       ? undefined
       : remoteUrl({ source, virtualUrl });
   const initialHistoryUrl =
     effectiveVirtualUrl ??
-    (sourceIsUri ? source.uri : sourceIsHtml ? (source.baseUrl ?? 'about:blank') : 'about:blank');
+    (sourceIsUri
+      ? source.uri
+      : sourceIsHtml
+        ? (source.baseUrl ?? 'about:blank')
+        : (virtualUrl ?? 'about:blank'));
   const sourceKey = JSON.stringify(source ?? null);
   const cacheRoot =
     effectiveVirtualUrl === undefined
@@ -698,8 +705,11 @@ const NativeLocalWebViewImplementation = forwardRef<
     }
     if (usesDirectSource) {
       const currentSource = sourceRef.current;
-      if (!currentSource || !('uri' in currentSource)) return;
-      setDocument(directSourceDocument(currentSource));
+      if (currentSource && 'uri' in currentSource) {
+        setDocument(directSourceDocument(currentSource));
+      } else if (virtualUrl !== undefined) {
+        setDocument(directSourceDocument({ uri: virtualUrl }));
+      }
       return () => {
         active = false;
         controller.abort();
@@ -866,6 +876,7 @@ const NativeLocalWebViewImplementation = forwardRef<
     allowContentSecurityPolicyBypass,
     cacheAdapter,
     cacheDirectory,
+    durableCacheEnabled,
     cacheMaxBytes,
     cacheMaxGenerations,
     cacheMaxInlineBytes,
@@ -879,6 +890,7 @@ const NativeLocalWebViewImplementation = forwardRef<
     sourcePath,
     trustedAssetOriginsKey,
     usesDirectSource,
+    virtualUrl,
   ]);
 
   const loading = pageLoading;
@@ -921,161 +933,7 @@ const NativeLocalWebViewImplementation = forwardRef<
   );
 });
 
-const NativeConfigFallback = forwardRef<NativeLocalWebViewHandle, NativeLocalWebViewProps>(
-  function NativeConfigFallback(props, forwardedRef) {
-    const legacyRef = useRef<LegacyLocalWebViewHandle>(null);
-    const webViewRef = useRef<ReactNativeWebView>(null);
-    const {
-      allowContentSecurityPolicyBypass,
-      cacheAdapter,
-      cacheDirectory,
-      cachePolicy,
-      forceRefresh,
-      onBundleError,
-      onBundleReady,
-      onBundleStored,
-      onCacheRollback,
-      onHistoryChange,
-      renderError,
-      renderLoading,
-      source,
-      sourcePath,
-      trustedAssetOrigins,
-      virtualUrl,
-      ...webViewProps
-    } = props;
-    if (virtualUrl !== undefined && source !== undefined) {
-      throw new Error('Provide either virtualUrl or source, not both');
-    }
-    if (sourcePath !== undefined && virtualUrl === undefined) {
-      throw new Error('sourcePath requires virtualUrl');
-    }
-    const mirroredSource =
-      source !== undefined &&
-      'uri' in source &&
-      source.uri.startsWith('https://') &&
-      (source.method === undefined || source.method.toUpperCase() === 'GET') &&
-      source.body === undefined &&
-      source.headers === undefined
-        ? source.uri
-        : undefined;
-    const mirroredUrl = virtualUrl ?? mirroredSource;
-    const directHistoryRef = useRef(
-      emptyHistoryState(
-        source && 'uri' in source
-          ? source.uri
-          : source && 'html' in source
-            ? (source.baseUrl ?? 'about:blank')
-            : 'about:blank'
-      )
-    );
-
-    useImperativeHandle(
-      forwardedRef,
-      () => ({
-        clearCache: (includeDiskFiles) =>
-          mirroredUrl
-            ? legacyRef.current?.clearCache(includeDiskFiles)
-            : webViewRef.current?.clearCache(includeDiskFiles),
-        clearFormData: () =>
-          mirroredUrl ? legacyRef.current?.clearFormData() : webViewRef.current?.clearFormData?.(),
-        clearHistory: () => {
-          if (mirroredUrl) {
-            legacyRef.current?.clearHistory();
-            return;
-          }
-          webViewRef.current?.clearHistory?.();
-          directHistoryRef.current = emptyHistoryState(directHistoryRef.current.url);
-          onHistoryChange?.(directHistoryRef.current);
-        },
-        getHistoryState: () =>
-          mirroredUrl
-            ? (legacyRef.current?.getHistoryState() ??
-              emptyHistoryState(mirroredUrl ?? 'about:blank'))
-            : directHistoryRef.current,
-        goBack: () => (mirroredUrl ? legacyRef.current?.goBack() : webViewRef.current?.goBack()),
-        goForward: () =>
-          mirroredUrl ? legacyRef.current?.goForward() : webViewRef.current?.goForward(),
-        injectJavaScript: (script) =>
-          mirroredUrl
-            ? legacyRef.current?.injectJavaScript(script)
-            : webViewRef.current?.injectJavaScript(script),
-        postMessage: (message) =>
-          mirroredUrl
-            ? legacyRef.current?.postMessage(message)
-            : webViewRef.current?.postMessage(message),
-        reload: () => (mirroredUrl ? legacyRef.current?.reload() : webViewRef.current?.reload()),
-        requestFocus: () =>
-          mirroredUrl ? legacyRef.current?.requestFocus() : webViewRef.current?.requestFocus(),
-        rollback: () =>
-          mirroredUrl
-            ? (legacyRef.current?.rollback() ?? Promise.resolve(false))
-            : Promise.resolve(false),
-        stopLoading: () =>
-          mirroredUrl ? legacyRef.current?.stopLoading() : webViewRef.current?.stopLoading(),
-      }),
-      [mirroredUrl, onHistoryChange]
-    );
-
-    if (mirroredUrl) {
-      return (
-        <LegacyLocalWebView
-          {...webViewProps}
-          allowContentSecurityPolicyBypass={allowContentSecurityPolicyBypass}
-          cacheAdapter={cacheAdapter}
-          cacheDirectory={cacheDirectory}
-          cachePolicy={cachePolicy}
-          forceRefresh={forceRefresh}
-          onBundleError={onBundleError}
-          onBundleReady={onBundleReady}
-          onBundleStored={onBundleStored}
-          onCacheRollback={onCacheRollback}
-          onHistoryChange={onHistoryChange}
-          ref={legacyRef}
-          renderError={(error) => renderError?.('ReactNativeLocalWebView', -1, error.message)}
-          renderLoading={() => renderLoading?.()}
-          sourcePath={sourcePath}
-          trustedAssetOrigins={trustedAssetOrigins}
-          virtualUrl={mirroredUrl}
-        />
-      );
-    }
-
-    return (
-      <ReactNativeWebView
-        {...webViewProps}
-        onNavigationStateChange={(navigation) => {
-          directHistoryRef.current = {
-            ...directHistoryRef.current,
-            canGoBack: navigation.canGoBack,
-            canGoForward: navigation.canGoForward,
-            navigationType: navigation.navigationType ?? 'document',
-            url: navigation.url,
-          };
-          onHistoryChange?.(directHistoryRef.current);
-          webViewProps.onNavigationStateChange?.(navigation);
-        }}
-        ref={webViewRef}
-        renderError={renderError}
-        renderLoading={renderLoading}
-        source={source}
-      />
-    );
-  }
-);
-
-const NativeLocalWebViewWithFallback = forwardRef<
-  NativeLocalWebViewHandle,
-  NativeLocalWebViewProps
->(function NativeLocalWebViewWithFallback(props, ref) {
-  return props.nativeConfig?.component ? (
-    <NativeConfigFallback {...props} ref={ref} />
-  ) : (
-    <NativeLocalWebViewImplementation {...props} ref={ref} />
-  );
-});
-
-export const NativeLocalWebView = Object.assign(NativeLocalWebViewWithFallback, {
+export const NativeLocalWebView = Object.assign(NativeLocalWebViewImplementation, {
   isFileUploadSupported: async (): Promise<boolean> => true,
 }) as NativeLocalWebViewComponent;
 

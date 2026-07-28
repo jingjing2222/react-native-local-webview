@@ -1,62 +1,14 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, StyleSheet, Text, View, type ViewProps } from 'react-native';
-import ReactNativeBlobUtil from 'react-native-blob-util';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import {
   ANDROID_WEBVIEW_PROP_NAMES,
-  createReactNativeBlobUtilCacheAdapter,
   IOS_WEBVIEW_PROP_NAMES,
   LocalWebView,
   SHARED_WEBVIEW_PROP_NAMES,
   type LocalWebViewHandle,
   type LocalWebViewProps,
+  type WebViewProps,
 } from 'react-native-local-webview';
-import type { WebViewProps } from 'react-native-webview';
-import type {
-  WebViewNavigationEvent,
-  WebViewProgressEvent,
-  WebViewSource,
-} from 'react-native-webview/lib/WebViewTypes';
-
-type NativeConfigReplacementProps = ViewProps & {
-  onLoadingFinish?: (event: WebViewNavigationEvent) => void;
-  onLoadingProgress?: (event: WebViewProgressEvent) => void;
-  onLoadingStart?: (event: WebViewNavigationEvent) => void;
-  source?: WebViewSource;
-};
-
-const NativeConfigReplacement = forwardRef<View, NativeConfigReplacementProps>(
-  function NativeConfigReplacement(
-    { accessibilityLabel, onLoadingFinish, onLoadingProgress, onLoadingStart, source, style },
-    ref
-  ) {
-    useEffect(() => {
-      const url =
-        source && 'uri' in source
-          ? source.uri
-          : source && 'baseUrl' in source
-            ? (source.baseUrl ?? 'about:blank')
-            : 'about:blank';
-      const nativeEvent = {
-        canGoBack: false,
-        canGoForward: false,
-        loading: false,
-        lockIdentifier: 0,
-        navigationType: 'other' as const,
-        title: 'nativeConfig replacement',
-        url,
-      };
-      const timeout = setTimeout(() => {
-        onLoadingStart?.({ nativeEvent } as WebViewNavigationEvent);
-        onLoadingProgress?.({
-          nativeEvent: { ...nativeEvent, progress: 1 },
-        } as unknown as WebViewProgressEvent);
-        onLoadingFinish?.({ nativeEvent } as WebViewNavigationEvent);
-      }, 0);
-      return () => clearTimeout(timeout);
-    }, [onLoadingFinish, onLoadingProgress, onLoadingStart, source]);
-    return <View accessibilityLabel={accessibilityLabel} ref={ref} style={style} />;
-  }
-) as unknown as NonNullable<WebViewProps['nativeConfig']>['component'];
 
 type CompatibilityConfiguration = {
   origin: string;
@@ -191,7 +143,6 @@ function valueForProp(name: string, origin: string): unknown {
       return ['https://*'];
     case 'nativeConfig':
       return {
-        component: NativeConfigReplacement,
         props: { accessibilityLabel: 'native-config-compatibility' },
       };
     case 'applicationNameForUserAgent':
@@ -557,10 +508,6 @@ export default function CompatibilityApp({
 }: {
   configuration: CompatibilityConfiguration;
 }) {
-  const cacheAdapter = useMemo(
-    () => createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil),
-    []
-  );
   const cases = useMemo(
     () => propCases(configuration.platform, configuration.origin),
     [configuration.origin, configuration.platform]
@@ -712,7 +659,6 @@ export default function CompatibilityApp({
           {...activeProps}
           key={active.id}
           ref={webViewRef}
-          cacheAdapter={cacheAdapter}
           renderError={(domain, code, description) => {
             const rendered = activeProps?.renderError?.(domain, code, description);
             if (active.expectation === 'render-error') {
@@ -1007,7 +953,7 @@ export default function CompatibilityApp({
             }
           }}
           onScroll={({ nativeEvent }) => {
-            void activeProps?.onScroll?.({ nativeEvent } as never);
+            activeProps?.onScroll?.({ nativeEvent } as never);
             if (active.expectation === 'scroll' && nativeEvent.contentOffset.y > 0) {
               void settle();
             }

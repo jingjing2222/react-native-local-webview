@@ -18,6 +18,16 @@
         "language": "kotlin",
         "implementationClassName": "HybridNativeLocalWebView"
       }
+    },
+    "LocalWebViewCache": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "HybridLocalWebViewCache"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "HybridLocalWebViewCache"
+      }
     }
   },
   "ignorePaths": ["node_modules", "test"]

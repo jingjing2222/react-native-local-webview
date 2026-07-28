@@ -11,6 +11,7 @@
 #import <type_traits>
 
 #include "HybridNativeLocalWebViewSpecSwift.hpp"
+#include "HybridLocalWebViewCacheSpecSwift.hpp"
 
 @interface ReactNativeLocalWebViewAutolinking : NSObject
 @end
@@ -25,6 +26,13 @@
     "NativeLocalWebView",
     []() -> std::shared_ptr<HybridObject> {
       std::shared_ptr<HybridNativeLocalWebViewSpec> hybridObject = ReactNativeLocalWebView::ReactNativeLocalWebViewAutolinking::createNativeLocalWebView();
+      return hybridObject;
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "LocalWebViewCache",
+    []() -> std::shared_ptr<HybridObject> {
+      std::shared_ptr<HybridLocalWebViewCacheSpec> hybridObject = ReactNativeLocalWebView::ReactNativeLocalWebViewAutolinking::createLocalWebViewCache();
       return hybridObject;
     }
   );

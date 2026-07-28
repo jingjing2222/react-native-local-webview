@@ -1,8 +1,3 @@
-import { sha256, sha384, sha512 } from '@noble/hashes/sha2.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
-
-import { base64ToBytes, bytesToUtf8 } from './binary';
-
 export type LocalWebViewFileEncoding = 'base64' | 'utf8';
 
 export type LocalWebViewHashAlgorithm = 'sha256' | 'sha384' | 'sha512';
@@ -56,13 +51,7 @@ export class LocalWebViewDownloadLimitError extends RangeError {
   }
 }
 
-/**
- * Platform capabilities required to persist and stream a local web bundle.
- *
- * Implementations may be backed by any React Native file-system/downloader
- * package. The core package does not rely on provider-specific response or
- * path types.
- */
+/** Internal boundary between the JS resource graph and the Nitro cache object. */
 export interface LocalWebViewCacheAdapter {
   /**
    * `documents` must be persistent application storage.
@@ -123,118 +112,6 @@ export interface LocalWebViewCacheAdapter {
    * Create or overwrite the complete destination file.
    */
   writeFile(path: string, value: string, encoding: LocalWebViewFileEncoding): Promise<void>;
-}
-
-export type CreateLocalWebViewCacheAdapterOptions = Pick<
-  LocalWebViewCacheAdapter,
-  | 'directories'
-  | 'download'
-  | 'exists'
-  | 'listDirectory'
-  | 'makeDirectory'
-  | 'moveFile'
-  | 'readFileRange'
-  | 'remove'
-  | 'stat'
-  | 'writeFile'
-> &
-  Partial<Pick<LocalWebViewCacheAdapter, 'copyFile' | 'hashFile' | 'readFile'>> & {
-    /**
-     * Byte range used by the default incremental `hashFile` implementation.
-     *
-     * @default 1048576 (1 MiB)
-     */
-    hashChunkBytes?: number;
-  };
-
-type IncrementalHash = {
-  destroy(): void;
-  digest(): Uint8Array;
-  update(bytes: Uint8Array): IncrementalHash;
-};
-
-function fileSize(stat: LocalWebViewFileStat, path: string): number {
-  const size = Number(stat.size);
-  if (!Number.isSafeInteger(size) || size < 0) {
-    throw new Error(`Invalid file size for ${path}: ${String(stat.size)}`);
-  }
-  return size;
-}
-
-/**
- * Creates a cache adapter from the host's filesystem and download primitives.
- *
- * `readFile`, `copyFile`, and incremental SHA-2 hashing are supplied when the
- * host does not provide optimized implementations. Large-file streaming still
- * requires a direct `readFileRange` implementation, and `download` must honor
- * the redirect, cancellation, timeout, and byte-limit contract.
- */
-export function createLocalWebViewCacheAdapter({
-  copyFile,
-  hashChunkBytes = 1024 * 1024,
-  hashFile,
-  readFile,
-  ...required
-}: CreateLocalWebViewCacheAdapterOptions): LocalWebViewCacheAdapter {
-  if (!Number.isSafeInteger(hashChunkBytes) || hashChunkBytes <= 0) {
-    throw new Error('hashChunkBytes must be a positive safe integer');
-  }
-  if (!required.directories.documents) {
-    throw new Error('directories.documents must identify persistent application storage');
-  }
-
-  const read =
-    readFile ??
-    (async (path: string, encoding: LocalWebViewFileEncoding): Promise<string> => {
-      const size = fileSize(await required.stat(path), path);
-      if (size === 0) return '';
-      const base64 = await required.readFileRange(path, 0, size, 'base64');
-      return encoding === 'base64' ? base64 : bytesToUtf8(base64ToBytes(base64));
-    });
-
-  const copy =
-    copyFile ??
-    (async (source: string, destination: string): Promise<void> => {
-      await required.writeFile(destination, await read(source, 'base64'), 'base64');
-    });
-
-  const hash =
-    hashFile ??
-    (async (
-      path: string,
-      algorithms: readonly LocalWebViewHashAlgorithm[]
-    ): Promise<LocalWebViewFileDigests> => {
-      const constructors = { sha256, sha384, sha512 };
-      const uniqueAlgorithms = [...new Set(algorithms)];
-      const hashers = new Map<LocalWebViewHashAlgorithm, IncrementalHash>(
-        uniqueAlgorithms.map((algorithm) => [algorithm, constructors[algorithm].create()])
-      );
-      try {
-        const size = fileSize(await required.stat(path), path);
-        for (let start = 0; start < size; start += hashChunkBytes) {
-          const end = Math.min(start + hashChunkBytes, size);
-          const bytes = base64ToBytes(await required.readFileRange(path, start, end, 'base64'));
-          if (bytes.byteLength !== end - start) {
-            throw new Error(
-              `readFileRange returned ${bytes.byteLength} bytes for [${start}, ${end}) in ${path}`
-            );
-          }
-          for (const hasher of hashers.values()) hasher.update(bytes);
-        }
-        return Object.fromEntries(
-          [...hashers].map(([algorithm, hasher]) => [algorithm, bytesToHex(hasher.digest())])
-        );
-      } finally {
-        for (const hasher of hashers.values()) hasher.destroy();
-      }
-    });
-
-  return {
-    ...required,
-    copyFile: copy,
-    hashFile: hash,
-    readFile: read,
-  };
 }
 
 export function createAbortError(): Error {

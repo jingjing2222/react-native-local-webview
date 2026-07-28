@@ -8,10 +8,13 @@
 #pragma once
 
 // Forward declarations of C++ defined types
+// Forward declaration of `HybridLocalWebViewCacheSpec` to properly resolve imports.
+namespace margelo::nitro::localwebview { class HybridLocalWebViewCacheSpec; }
 // Forward declaration of `HybridNativeLocalWebViewSpec` to properly resolve imports.
 namespace margelo::nitro::localwebview { class HybridNativeLocalWebViewSpec; }
 
 // Include C++ defined types
+#include "HybridLocalWebViewCacheSpec.hpp"
 #include "HybridNativeLocalWebViewSpec.hpp"
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/Result.hpp>
@@ -19,6 +22,7 @@ namespace margelo::nitro::localwebview { class HybridNativeLocalWebViewSpec; }
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // C++ helpers for Swift
 #include "ReactNativeLocalWebView-Swift-Cxx-Bridge.hpp"
@@ -30,6 +34,8 @@ namespace margelo::nitro::localwebview { class HybridNativeLocalWebViewSpec; }
 #include <NitroModules/DateToChronoDate.hpp>
 
 // Forward declarations of Swift defined types
+// Forward declaration of `HybridLocalWebViewCacheSpec_cxx` to properly resolve imports.
+namespace ReactNativeLocalWebView { class HybridLocalWebViewCacheSpec_cxx; }
 // Forward declaration of `HybridNativeLocalWebViewSpec_cxx` to properly resolve imports.
 namespace ReactNativeLocalWebView { class HybridNativeLocalWebViewSpec_cxx; }
 

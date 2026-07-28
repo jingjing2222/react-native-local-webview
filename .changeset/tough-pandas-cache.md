@@ -2,9 +2,8 @@
 'react-native-local-webview': patch
 ---
 
-Add the Nitro-backed native WebView runtime with React Native WebView 13.16.0
-prop, event, and method compatibility for durable CSR and Unity WebGL bundles.
-On a cache miss, display the remote HTTPS page immediately while installing the
-verified local generation in the background. Bound iOS local-file delivery to
-prevent large Unity payloads from being queued into WebKit faster than its
-content process can consume them.
+Move durable downloads, file operations, range reads, and SHA-2 hashing into
+the Nitro native runtime. Consumers no longer install `react-native-webview`,
+`react-native-blob-util`, or another filesystem adapter. Keep the
+React Native WebView 13.16.0-compatible prop, event, and method surface on the
+built-in iOS and Android WebViews.

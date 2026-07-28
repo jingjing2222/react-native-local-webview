@@ -1,22 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import ReactNativeBlobUtil from 'react-native-blob-util';
 import {
-  createReactNativeBlobUtilCacheAdapter,
-  LegacyLocalWebView,
-  NativeLocalWebView,
+  cacheDirectoryForOrigin,
+  clearLocalWebViewCache,
+  LocalWebView,
   resolveWebBundle,
-  type LocalWebViewCacheAdapter,
   type MirroredWebBundle,
 } from 'react-native-local-webview';
-import { WebView } from 'react-native-webview';
 
 const MIB = 1024 * 1024;
-const COOKIE = 'local-webview-benchmark=allowed';
 const MOUNT_TIMEOUT_MS = 45 * 60 * 1000;
 const REMOTE_OFFLINE_OBSERVATION_MS = 30 * 1000;
 
-type BenchmarkRuntime = 'bridge' | 'native' | 'remote';
+type BenchmarkRuntime = 'native' | 'remote';
 
 type BenchmarkConfiguration = {
   origin: string;
@@ -103,8 +99,7 @@ function parseConfiguration(url: string): BenchmarkConfiguration | undefined {
     const runId = parsed.searchParams.get('runId');
     if (!origin || !runId || new URL(origin).protocol !== 'https:') return undefined;
     const requestedRuntime = parsed.searchParams.get('runtime');
-    const runtime: BenchmarkRuntime =
-      requestedRuntime === 'native' || requestedRuntime === 'remote' ? requestedRuntime : 'bridge';
+    const runtime: BenchmarkRuntime = requestedRuntime === 'remote' ? 'remote' : 'native';
     return {
       origin: new URL(origin).origin,
       platform: parsed.searchParams.get('platform') || 'unknown',
@@ -172,36 +167,6 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
   const [failure, setFailure] = useState<string>();
   const mountSequence = useRef(0);
   const pending = useRef<PendingMount | undefined>(undefined);
-
-  // The adapter is deliberately co-located with the LocalWebView that consumes it.
-  // It adds the benchmark's authenticated download cookie and instruments direct
-  // positional reads, which are the JS-to-native bridge path for local WebGL assets.
-  const cacheAdapter = useMemo<LocalWebViewCacheAdapter>(() => {
-    const base = createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil);
-    return {
-      ...base,
-      download: (options) =>
-        base.download({
-          ...options,
-          headers: {
-            ...options.headers,
-            Cookie: COOKIE,
-          },
-        }),
-      readFileRange: async (path, start, end, encoding) => {
-        const bridge = pending.current?.bridge;
-        const startedAt = Date.now();
-        if (bridge && bridge.firstStartedAt === undefined) bridge.firstStartedAt = startedAt;
-        const value = await base.readFileRange(path, start, end, encoding);
-        if (bridge) {
-          bridge.bytes += end - start;
-          bridge.calls += 1;
-          bridge.lastFinishedAt = Date.now();
-        }
-        return value;
-      },
-    };
-  }, []);
 
   const settleIfReady = useCallback(() => {
     const current = pending.current;
@@ -323,10 +288,10 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
       return result;
     };
     const removeCache = async (cacheDirectory: string) => {
-      if (await cacheAdapter.exists(cacheDirectory)) await cacheAdapter.remove(cacheDirectory);
+      await clearLocalWebViewCache(origin, cacheDirectory);
     };
     const scenarioCache = (label: string) =>
-      `${cacheAdapter.directories.documents}/local-webview-benchmark/${cacheName(runId, label)}`;
+      `${cacheDirectoryForOrigin(origin)}/benchmark/${cacheName(runId, label)}`;
 
     await postJson(origin, '/__control/reset', { runId });
     await report({
@@ -400,7 +365,6 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
       });
       await resolveWebBundle({
         allowContentSecurityPolicyBypass: true,
-        cacheAdapter,
         cacheDirectory: edgeCache,
         cachePolicy: {
           maxBytes: 800 * MIB,
@@ -429,7 +393,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
       suite,
     });
     setStatus('Benchmark complete');
-  }, [cacheAdapter, configuration, mount, unmount]);
+  }, [configuration, mount, unmount]);
 
   const settleError = useCallback((error: Error) => {
     const current = pending.current;
@@ -534,9 +498,10 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     <View style={styles.container}>
       {active ? (
         configuration.runtime === 'remote' ? (
-          <WebView
+          <LocalWebView
             key={active.id}
             cacheEnabled
+            durableCacheEnabled={false}
             domStorageEnabled
             javaScriptEnabled
             onError={handleRemoteError}
@@ -546,28 +511,9 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
             source={{ uri: active.virtualUrl }}
             style={styles.webView}
           />
-        ) : configuration.runtime === 'native' ? (
-          <NativeLocalWebView
-            key={active.id}
-            cacheAdapter={cacheAdapter}
-            cacheDirectory={active.cacheDirectory}
-            cachePolicy={{
-              maxBytes: 800 * MIB,
-              maxGenerations: 1,
-              maxInlineBytes: 4 * MIB,
-            }}
-            allowContentSecurityPolicyBypass={active.allowContentSecurityPolicyBypass}
-            onBundleError={handleBundleError}
-            onBundleReady={handleBundleReady}
-            onBundleStored={handleBundleStored}
-            onMessage={handleMessage}
-            virtualUrl={active.virtualUrl}
-            style={styles.webView}
-          />
         ) : (
-          <LegacyLocalWebView
+          <LocalWebView
             key={active.id}
-            cacheAdapter={cacheAdapter}
             cacheDirectory={active.cacheDirectory}
             cachePolicy={{
               maxBytes: 800 * MIB,
