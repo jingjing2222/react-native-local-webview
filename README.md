@@ -34,8 +34,6 @@ yarn add react-native-local-webview react-native-nitro-modules
 cd ios && pod install
 ```
 
-No `react-native-webview`, Blob utility, or filesystem adapter is required.
-
 Requirements:
 
 - React Native New Architecture
@@ -148,8 +146,8 @@ inline HTML use direct mode automatically.
 ## React Native WebView compatibility
 
 The public props, events, and ten imperative methods track
-`react-native-webview@13.16.0`, but this package does not import or install it.
-The implementation uses `WKWebView` and `android.webkit.WebView` directly.
+`react-native-webview@13.16.0`. The implementation uses `WKWebView` and
+`android.webkit.WebView` directly.
 
 `nativeConfig.props` can pass extra values to the built-in Nitro native view.
 Replacing the component through `nativeConfig.component` is intentionally not

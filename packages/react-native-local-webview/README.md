@@ -26,8 +26,6 @@ This package keeps those concerns separate:
   through the React Native bridge.
 - The native WebView serves verified local bytes for matching HTTPS requests.
 
-No separate WebView or filesystem package is required.
-
 ## Installation
 
 ```sh
@@ -205,8 +203,7 @@ await rollbackWebBundle(directory);
 await clearLocalWebViewCache(url);
 ```
 
-`resolveWebBundle` uses the same built-in native downloader and storage runtime as the component.
-It does not accept a filesystem adapter.
+`resolveWebBundle` runs the same cache lifecycle as the component.
 
 ## Events
 
@@ -251,13 +248,12 @@ also use direct mode automatically.
 
 ## React Native WebView compatibility
 
-The public props, events, and imperative methods track `react-native-webview@13.16.0`, but this
-package does not import or install it. Native behavior is implemented directly with `WKWebView`
-and Android `WebView`.
+The public props, events, and imperative methods track `react-native-webview@13.16.0`. Native
+behavior is implemented directly with `WKWebView` and Android `WebView`.
 
 `nativeConfig.props` can pass additional values to the built-in Nitro view. Replacing the native
 component through `nativeConfig.component` is intentionally unsupported because doing so would
-bypass this runtime and reintroduce the external WebView dependency.
+bypass the origin-preserving delivery and cache lifecycle.
 
 ## CSP and trust boundaries
 
