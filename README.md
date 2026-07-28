@@ -21,7 +21,8 @@ History API, workers, WASM, and Range requests.
 first mount ──▶ remote HTTPS page ──▶ visible immediately
         └────▶ native download + hash ──▶ durable generation
 
-warm/offline mount ──▶ verified local files ──▶ original HTTPS browsing context
+warm/offline mount ──▶ published local files ──▶ original HTTPS browsing context
+        └────▶ native rehash + ETag checks ──▶ repair or next generation
 ```
 
 Large response bodies, file copies, ranges, and SHA-2 hashing stay native. They
@@ -73,7 +74,7 @@ entry. Do not pass `virtualUrl` and `source` together.
 | Eviction        | Controlled by the OS         | App-owned persistent files             |
 | Offline release | Independent cached responses | Atomic verified generation             |
 | First install   | Remote page                  | Same remote page, mirror in background |
-| Warm start      | Cache policy dependent       | Verified local generation              |
+| Warm start      | Cache policy dependent       | Published local generation immediately |
 | Page origin     | HTTPS                        | Same HTTPS origin                      |
 | Large-file path | WebView network stack        | Native file stream                     |
 | Revalidation    | Browser-defined              | Per-resource ETag and SHA-256          |
@@ -104,10 +105,13 @@ On a cold install, the current remote document becomes visible before the
 mirror completes. `onBundleStored` marks the point at which the new generation
 is durable.
 
-On a warm start, the verified local generation is shown first. Every resource
-with an ETag is conditionally requested. A resource without an ETag is
-downloaded and compared by SHA-256. Any change creates a new generation; a
-failed refresh leaves the active generation intact.
+On a warm start, the previously committed local generation is shown as soon as
+its state, manifest, and entry path are present. Full local SHA-256 verification
+and remote revalidation then run behind the visible page. Every resource with an
+ETag is conditionally requested. A resource without an ETag is downloaded and
+compared by SHA-256. Corruption falls back to a verified rollback or the remote
+page; a changed response creates a new generation without damaging the active
+one.
 
 Useful controls:
 
@@ -142,9 +146,10 @@ The native downloader computes the required SHA-2 digests while response bytes
 are being written. Android and iOS batch file I/O in 256 KiB chunks. This
 changes where the same integrity work happens; it does not skip it.
 
-Warm activation still reads and hashes every persisted payload before serving
-it. This integrity check is intentional; the optimizations above do not replace
-it with timestamps or cached metadata.
+Each generation is fully hashed before it is published. A later warm mount does
+not block WebView navigation on hashing hundreds of MiB again: it checks the
+atomically published metadata and entry path, starts the original HTTPS URL from
+local files, and performs the full payload rehash in the background.
 
 ## Direct baseline
 
@@ -198,25 +203,25 @@ Each platform produces a direct-vs-local report with page-ready time,
 background storage time, network bytes, 304 counts, offline availability, and
 peak memory.
 
-### Measured iOS baseline
+### Measured iOS simulator run
 
-Before the cache data plane moved fully native, one sequential Release run on
-an iPhone 17 Pro iOS 26.5 simulator hosted by an Apple M4 Mac mini produced:
+One sequential Release run of this revision on an iPhone 17 Pro iOS 26.5
+simulator hosted by an Apple M4 Mac mini produced:
 
 | Unity graph | Direct first page | Local first page | Direct warm | Local warm | Local offline |
 | ----------- | ----------------: | ---------------: | ----------: | ---------: | ------------: |
-| 50 MiB      |            1.49 s |           1.48 s |      0.59 s |     2.19 s |        2.18 s |
-| 200 MiB     |            2.88 s |           2.92 s |      2.41 s |     2.83 s |        2.82 s |
-| 500 MiB     |            5.59 s |           7.46 s |      5.00 s |     4.13 s |        4.12 s |
+| 50 MiB      |            1.81 s |           1.51 s |      0.60 s |     1.95 s |        2.08 s |
+| 200 MiB     |            3.14 s |           2.89 s |      2.55 s |     2.71 s |        2.70 s |
+| 500 MiB     |            5.68 s |           7.30 s |      5.54 s |     3.89 s |        3.77 s |
 
 The direct runtime timed out after 30 seconds in every offline phase. The local
 runtime used zero network bytes for ETag warm and offline phases. First install
 used roughly twice the network bytes because the visible remote page and
 background durable mirror intentionally run together.
 
-This is the pre-migration regression baseline, not a claim about the current
-native-cache revision or physical-device performance. Run `/e2e` on this
-revision before making a production decision.
+The local runtime's peak app-host/WebKit/combined RSS was 585/1,047/1,623 MiB
+versus 260/1,046/1,271 MiB for direct mode. These are single simulator runs, not
+physical-device or statistically stable production budgets.
 
 See [the package guide](./packages/react-native-local-webview/README.md) for the
 complete API and [the E2E guide](./e2e/README.md) for benchmark mechanics.

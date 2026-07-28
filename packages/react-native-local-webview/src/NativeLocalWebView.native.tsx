@@ -719,6 +719,7 @@ const NativeLocalWebViewImplementation = forwardRef<
     assertHttpsUrl(nextVirtualUrl);
 
     let hasVisibleDocument = false;
+    let publishedGenerationId: string | undefined;
     const waitForVisibleDocument = (): Promise<void> =>
       new Promise<void>((resolve) => {
         let released = false;
@@ -766,9 +767,19 @@ const NativeLocalWebViewImplementation = forwardRef<
       setDocument(runtimeDocument);
       callbacksRef.current.onBundleReady?.(bundle);
     };
-    const showRemoteDocument = (): Promise<void> => {
-      if (!active || documentEpochRef.current !== documentEpoch || hasVisibleDocument) {
+    const showRemoteDocument = (replaceVisibleDocument = false): Promise<void> => {
+      if (
+        !active ||
+        documentEpochRef.current !== documentEpoch ||
+        (hasVisibleDocument && !replaceVisibleDocument)
+      ) {
         return Promise.resolve();
+      }
+      if (replaceVisibleDocument) {
+        leaseReleaseRef.current?.();
+        leaseReleaseRef.current = undefined;
+        bundleRef.current = undefined;
+        rollbackAttemptedRef.current = false;
       }
       hasVisibleDocument = true;
       setStatus('Loading the remote site while its durable copy is saved in the background…');
@@ -819,8 +830,24 @@ const NativeLocalWebViewImplementation = forwardRef<
                 maxInlineBytes: cacheMaxInlineBytes,
               },
         forceRefresh,
+        onPublishedBundle: async (publishedBundle) => {
+          publishedGenerationId = publishedBundle?.generationId;
+          if (publishedBundle) {
+            const loaded = waitForVisibleDocument();
+            try {
+              await showLocalBundle(publishedBundle);
+              await loaded;
+            } catch (reason) {
+              backgroundWorkGateRef.current?.release();
+              throw reason;
+            }
+          } else {
+            await showRemoteDocument();
+          }
+        },
         onCachedBundle: async (cachedBundle) => {
           if (cachedBundle) {
+            if (cachedBundle.generationId === publishedGenerationId) return;
             const loaded = waitForVisibleDocument();
             try {
               await showLocalBundle(cachedBundle);
@@ -829,8 +856,10 @@ const NativeLocalWebViewImplementation = forwardRef<
               backgroundWorkGateRef.current?.release();
               throw reason;
             }
-          } else {
+          } else if (publishedGenerationId === undefined) {
             await showRemoteDocument();
+          } else {
+            await showRemoteDocument(true);
           }
         },
         onProgress: (message) => {

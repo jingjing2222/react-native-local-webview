@@ -24,7 +24,7 @@ This package keeps those concerns separate:
 - Native networking streams response bodies directly to files.
 - Native SHA-256, SHA-384, and SHA-512 validate cached files without moving large payloads
   through the React Native bridge.
-- The native WebView serves verified local bytes for matching HTTPS requests.
+- The native WebView serves the last atomically published local bytes for matching HTTPS requests.
 
 ## Installation
 
@@ -88,9 +88,10 @@ for the full Unity payload to be copied.
 
 ### Warm start
 
-The last complete generation is verified and displayed from local storage. Every remote resource
-is then revalidated. ETags are checked per asset, not only on `index.html`; resources without an
-ETag are downloaded and compared by SHA-256.
+The last complete generation is displayed as soon as its published state, manifest, and entry path
+are present. Full local SHA-256 verification and remote revalidation then run behind the visible
+page. ETags are checked per asset, not only on `index.html`; resources without an ETag are
+downloaded and compared by SHA-256.
 
 If nothing changed, the active local generation stays in place. If anything changed, a new
 generation is built and committed atomically for the next mount.
@@ -98,7 +99,9 @@ generation is built and committed atomically for the next mount.
 The cache data path avoids redundant work: required SHA-2 digests are computed while downloads are
 written, successful downloads return their exact byte count without a second `stat`, and 304
 responses do not create temporary files. iOS also reuses one networking session across the bounded
-revalidation batch. Persisted files are still fully hashed before a generation is activated.
+revalidation batch. Files are fully hashed before a generation is published and rehashed after a
+later warm navigation has started. If that background check finds corruption, the runtime replaces
+the page with a verified rollback or the remote document.
 
 ### Offline start
 

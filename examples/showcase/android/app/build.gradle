@@ -54,6 +54,19 @@ react {
     autolinkLibrariesWithApp()
 }
 
+def localWebViewJavaScriptSources = rootProject.fileTree(
+    "../../../packages/react-native-local-webview"
+) {
+    include "package.json"
+    include "src/**"
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith("createBundle") && task.name.endsWith("JsAndAssets")) {
+        task.inputs.files(localWebViewJavaScriptSources)
+    }
+}
+
 /**
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */

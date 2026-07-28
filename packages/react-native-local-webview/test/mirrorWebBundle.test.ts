@@ -929,6 +929,61 @@ describe('resolveWebBundle', () => {
     });
   });
 
+  it('publishes a committed warm generation before hashing its payloads', async () => {
+    const first = await resolveWebBundle({ virtualUrl: ENTRY });
+    const generationPath = `/generations/${first.generationId}/`;
+    let cachedHashCalls = 0;
+    const observations: Array<{
+      bundle: string | undefined;
+      hashes: number;
+      requests: number;
+    }> = [];
+    const observedAdapter: LocalWebViewCacheAdapter = {
+      ...cacheAdapter,
+      async hashFile(path, algorithms) {
+        if (path.includes(generationPath)) cachedHashCalls += 1;
+        return cacheAdapter.hashFile(path, algorithms);
+      },
+    };
+    native.requests.length = 0;
+
+    await resolveWebBundleWithAdapter({
+      cacheAdapter: observedAdapter,
+      onPublishedBundle: (bundle) => {
+        observations.push({
+          bundle: bundle?.generationId,
+          hashes: cachedHashCalls,
+          requests: native.requests.length,
+        });
+      },
+      virtualUrl: ENTRY,
+    });
+
+    expect(observations).toEqual([
+      {
+        bundle: first.generationId,
+        hashes: 0,
+        requests: 0,
+      },
+    ]);
+    expect(cachedHashCalls).toBeGreaterThan(0);
+  });
+
+  it('does not publish a generation whose entry path is missing', async () => {
+    const first = await resolveWebBundle({ virtualUrl: ENTRY });
+    native.files.delete(first.sourcePath);
+    const published: Array<string | undefined> = [];
+
+    await resolveWebBundle({
+      onPublishedBundle: (bundle) => {
+        published.push(bundle?.generationId);
+      },
+      virtualUrl: ENTRY,
+    });
+
+    expect(published).toEqual([undefined]);
+  });
+
   it('returns an offline fallback with sibling validators already in flight', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
     let scriptStarted = false;

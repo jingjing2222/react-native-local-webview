@@ -262,6 +262,7 @@ function fixtureAsset(prefix, name, query) {
 }
 
 function gameDocument(prefix, sizeMiB, query) {
+  const timeoutMilliseconds = sizeMiB >= 500 ? 60000 : 30000;
   return Buffer.from(`<!doctype html>
 <html lang="en">
 <head>
@@ -286,9 +287,9 @@ function gameDocument(prefix, sizeMiB, query) {
       globalThis.ReactNativeWebView?.postMessage(JSON.stringify({
         channel: 'local-webview-benchmark:page',
         kind: 'error',
-        message: 'Remote WebView did not load the benchmark runtime within 30 seconds.'
+        message: 'The benchmark page did not finish within ${timeoutMilliseconds / 1000} seconds.'
       }));
-    }, 30000);
+    }, ${timeoutMilliseconds});
   </script>
   <script src="${fixtureAsset(prefix, 'Builds.loader.js', query)}"></script>
   <script src="${fixtureAsset(prefix, 'benchmark.js', query)}"></script>

@@ -87,6 +87,15 @@ export type ResolveWebBundleOptions = {
   cachePolicy?: CachePolicy;
   forceRefresh?: boolean;
   /**
+   * Called as soon as an atomically published generation can be identified
+   * from cache state and its entry path. Payload hashes are verified
+   * afterwards, before `onCachedBundle` is called.
+   *
+   * This latency-sensitive hook lets a WebView start a warm local navigation
+   * without waiting for every large WebGL payload to be hashed again.
+   */
+  onPublishedBundle?: (bundle: MirroredWebBundle | undefined) => Promise<void> | void;
+  /**
    * Called after the durable cache has been validated, before any network
    * revalidation or download starts. `undefined` means that no usable local
    * generation exists yet.
@@ -1265,6 +1274,70 @@ async function readCachedBundle(
   return undefined;
 }
 
+async function readPublishedBundle(
+  cacheAdapter: LocalWebViewCacheAdapter,
+  cacheDirectory: string,
+  securityPolicyFingerprint: string,
+  requestedUrl: string,
+  maxBytes: number
+): Promise<MirroredWebBundle | undefined> {
+  const state = await readCacheState(cacheAdapter, cacheDirectory);
+  if (!state) return undefined;
+  const ordered = [
+    state.activeGeneration,
+    ...state.generations
+      .map((generation) => generation.generationId)
+      .filter((generationId) => generationId !== state.activeGeneration),
+  ];
+
+  for (const generationId of ordered) {
+    const generationIndex = state.generations.findIndex(
+      (generation) => generation.generationId === generationId
+    );
+    const summary = state.generations[generationIndex];
+    if (
+      !summary ||
+      summary.securityPolicyFingerprint !== securityPolicyFingerprint ||
+      summary.totalBytes > maxBytes
+    ) {
+      continue;
+    }
+    const manifest = await readGenerationManifest(cacheAdapter, cacheDirectory, generationId);
+    if (
+      !manifest ||
+      manifest.securityPolicyFingerprint !== securityPolicyFingerprint ||
+      manifest.totalBytes !== summary.totalBytes ||
+      !generationMatchesEntry(manifest, requestedUrl) ||
+      !(await cacheAdapter.exists(sourcePath(cacheDirectory, generationId)))
+    ) {
+      continue;
+    }
+    return {
+      baseUrl: documentUrlForRequest(
+        manifest.documentUrl,
+        manifest.documentFragment,
+        manifest.documentFragmentInherited,
+        requestedUrl
+      ),
+      downloadedAssets: manifest.downloadedAssets,
+      generationId,
+      localAssets: localAssetsForGeneration(cacheDirectory, generationId, manifest),
+      rollbackAvailable: await hasRollbackForEntry(
+        cacheAdapter,
+        cacheDirectory,
+        state.generations.slice(generationIndex + 1),
+        generationId,
+        securityPolicyFingerprint,
+        manifest.entryUrl
+      ),
+      sourcePath: sourcePath(cacheDirectory, generationId),
+      totalBytes: manifest.totalBytes,
+      usedCachedBundle: true,
+    };
+  }
+  return undefined;
+}
+
 async function applyCachePolicy(
   cacheDirectory: string,
   state: CacheState,
@@ -2111,6 +2184,7 @@ async function resolveWebBundleUnlocked({
   cachePolicy,
   forceRefresh = false,
   onCachedBundle,
+  onPublishedBundle,
   onProgress,
   signal,
   trustedAssetOrigins,
@@ -2147,6 +2221,17 @@ async function resolveWebBundleUnlocked({
   const generationValidationCache: GenerationValidationCache = new Map();
   cacheRuntimes.set(cacheDirectory, { cacheAdapter, policy });
   await mkdir(cacheAdapter, cacheDirectory);
+  const publishedCached = onPublishedBundle
+    ? await readPublishedBundle(
+        cacheAdapter,
+        cacheDirectory,
+        generationPolicyFingerprint,
+        virtualUrl,
+        policy.maxBytes
+      )
+    : undefined;
+  await onPublishedBundle?.(publishedCached);
+  throwIfAborted(signal);
   const stagingDirectory = await reconcileCache(
     cacheAdapter,
     cacheDirectory,
