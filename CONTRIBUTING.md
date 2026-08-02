@@ -61,14 +61,22 @@ first run intentionally downloads the direct page and durable copy in parallel.
 
 1. JavaScript sends the view only a cache request containing the origin, cache
    directory, policy limits, validation mode, and security fingerprint.
-2. The iOS or Android implementation reads `state.json`, the active manifest,
-   `index.html`, and referenced file metadata directly from persistent storage.
-3. The implementation registers the local request map and starts navigation at
-   the original HTTPS URL.
-4. Matching requests are served from the published generation while the page
-   retains its HTTPS browsing context.
-5. After the local page loads, background validation begins. In
-   `release-etag` mode this is one conditional entry request.
+2. Android reads `state.json`, the active manifest, and referenced file metadata
+   directly from persistent storage, registers the local request map, and
+   starts navigation at the original HTTPS URL. The document-start API is used
+   when available, followed by streaming `shouldInterceptRequest` responses;
+   older System WebViews use the in-memory script-injection fallback.
+3. iOS starts the original URL on WebKit's ordinary cache path immediately. The
+   process-wide HTTPS protocol explicitly leaves GET and HEAD on WebKit while
+   forwarding mutating requests through a streamed native upload task so their
+   bodies survive protocol registration.
+4. iOS retains the published generation without sending its HTML or inventory
+   through React state. A missing network path, navigation failure, or actual
+   release-check failure switches to the file-backed local generation. There is
+   no fixed fallback timeout.
+5. Background validation runs alongside the visible page. In `release-etag`
+   mode the library adds one conditional entry request; WebKit may also perform
+   its normal per-resource cache validations on iOS.
 6. A changed release is installed as a separate generation and becomes active
    on a later mount; it does not replace bytes under the running page.
 
@@ -92,7 +100,7 @@ generations/
   <generation-id>/
     index.html
     manifest.json
-    assets/<sha256>
+    assets/<sha256> # only when at least one resource requires file delivery
 ```
 
 `state.json` publishes the active generation. Temporary state files and staging
@@ -105,6 +113,12 @@ Resources use two delivery classifications:
 - `inline`: parser-required text or bounded data embedded into localized output;
 - `file`: large or streamable resources retained as files and served by the
   platform interceptor.
+
+In `release-etag` mode, the entry ETag validates the complete release. The
+persisted remote-resource map therefore contains only the entry and resources
+that still require file delivery; metadata for bytes already embedded in
+`index.html` is redundant and is omitted. `content-hash` mode retains the full
+remote-resource map because per-resource validation needs it.
 
 The current cache format is version 14. A schema or delivery-semantics change
 must update the format constant in all three readers:
@@ -182,7 +196,7 @@ Run the complete CI-equivalent suite:
 yarn check
 ```
 
-It includes formatting, lint, TypeScript checks, 301 unit tests, tsdown output,
+It includes formatting, lint, TypeScript checks, 302 unit tests, tsdown output,
 and package publication validation. Useful individual commands are:
 
 ```sh

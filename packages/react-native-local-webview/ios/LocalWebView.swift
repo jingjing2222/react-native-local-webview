@@ -1,6 +1,28 @@
 import NitroModules
+import Network
 import UIKit
 import WebKit
+
+private final class LocalWebViewConnectivity {
+  private let lock = NSLock()
+  private let monitor = NWPathMonitor()
+  private var observedStatus: NWPath.Status?
+
+  init() {
+    monitor.pathUpdateHandler = { [weak self] path in
+      self?.lock.lock()
+      self?.observedStatus = path.status
+      self?.lock.unlock()
+    }
+    monitor.start(queue: DispatchQueue(label: "react-native-local-webview.connectivity"))
+  }
+
+  var isDefinitelyOffline: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return observedStatus == .unsatisfied
+  }
+}
 
 private final class LocalWebViewContainer: UIView {
   weak var owner: LocalWebView?
@@ -227,6 +249,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
   private static let messageHandlerName = "ReactNativeWebView"
   private static let historyHandlerName = "ReactNativeHistoryShim"
   private static let requestBodyHandlerName = "ReactNativeLocalWebViewRequestBody"
+  private static let connectivity = LocalWebViewConnectivity()
   private static let sharedProcessPool = WKProcessPool()
   private static let silentAudioDataUri = "data:audio/mp3;base64,//tAxAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAFAAAESAAzMzMzMzMzMzMzMzMzMzMzMzMzZmZmZmZmZmZmZmZmZmZmZmZmZmaZmZmZmZmZmZmZmZmZmZmZmZmZmczMzMzMzMzMzMzMzMzMzMzMzMzM//////////////////////////8AAAA5TEFNRTMuMTAwAZYAAAAAAAAAABQ4JAMGQgAAOAAABEhNIZS0AAAAAAD/+0DEAAPH3Yz0AAR8CPqyIEABp6AxjG/4x/XiInE4lfQDFwIIRE+uBgZoW4RL0OLMDFn6E5v+/u5ehf76bu7/6bu5+gAiIQGAABQIUJ0QolFghEn/9PhZQpcUTpXMjo0OGzRCZXyKxoIQzB2KhCtGobpT9TRVj/3Pmfp+f8X7Pu1B04sTnc3s0XhOlXoGVCMNo9X//9/r6a10TZEY5DsxqvO7mO5qFvpFCmKIjhpSItGsUYcRO//7QsQRgEiljQIAgLFJAbIhNBCa+JmorCbOi5q9nVd2dKnusTMQg4MFUlD6DQ4OFijwGAijRMfLbHG4nLVTjydyPlJTj8pfPflf9/5GD950A5e+jsrmNZSjSirjs1R7hnkia8vr//l/7Nb+crvr9Ok5ZJOylUKRxf/P9Zn0j2P4pJYXyKkeuy5wUYtdmOu6uobEtFqhIJViLEKIjGxchGev/L3Y0O3bwrIOszTBAZ7Ih28EUaSOZf/7QsQfg8fpjQIADN0JHbGgQBAZ8T//y//t/7d/2+f5m7MdCeo/9tdkMtGLbt1tqnabRroO1Qfvh20yEbei8nfDXP7btW7f9/uO9tbe5IvHQbLlxpf3DkAk0ojYcv///5/u3/7PTfGjPEPUvt5D6f+/3Lea4lz4tc4TnM/mFPrmalWbboeNiNyeyr+vufttZuvrVrt/WYv3T74JFo8qEDiJqJrmDTs///v99xDku2xG02jjunrICP/7QsQtA8kpkQAAgNMA/7FgQAGnobgfghgqA+uXwWQ3XFmGimSbe2X3ksY//KzK1a2k6cnNWOPJnPWUsYbKqkh8RJzrVf///P///////4vyhLKHLrCb5nIrYIUss4cthigL1lQ1wwNAc6C1pf1TIKRSkt+a//z+yLVcwlXKSqeSuCVQFLng2h4AFAFgTkH+Z/8jTX/zr//zsJV/5f//5UX/0ZNCNCCaf5lTCTRkaEdhNP//n/KUjf/7QsQ5AEhdiwAAjN7I6jGddBCO+WGTQ1mXrYatSAgaykxBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg=="
 
@@ -249,8 +272,12 @@ final class LocalWebView: HybridLocalWebViewSpec {
   private var progressObservation: NSKeyValueObservation?
   private var protocolInstallationReleased = false
   private var refreshControl: UIRefreshControl?
+  private var requestBodyCaptureEnabled = false
+  private var remoteCacheFallbackPending = false
   private var savedStatusBarHidden = false
   private var savedStatusBarStyle: UIStatusBarStyle = .default
+  private var suppressNextLoadStart = false
+  private var usesRemoteCachePreferred = false
   private var webView: WKWebView?
 
   let view: UIView
@@ -351,6 +378,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
     lifecycleObservers.removeAll()
     refreshControl?.removeFromSuperview()
     refreshControl = nil
+    cancelRemoteCacheFallback()
     LocalAssetURLProtocol.unregister(registryId: protocolRegistryId)
     defer {
       if !protocolInstallationReleased {
@@ -436,7 +464,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
   func reload() throws {
     onMain { [weak self] in
       guard let self, let webView = self.webView else { return }
-      if webView.url == nil {
+      if webView.url == nil || self.usesRemoteCachePreferred {
         self.loadedDocumentId = ""
         do {
           try self.loadDocument()
@@ -533,8 +561,61 @@ final class LocalWebView: HybridLocalWebViewSpec {
     configureCookieStoreObservation()
   }
 
+  private func cancelRemoteCacheFallback() {
+    remoteCacheFallbackPending = false
+  }
+
+  private func loadCachedBundle(
+    in webView: WKWebView,
+    replacingRemoteLoad: Bool
+  ) throws -> Bool {
+    guard
+      let cached = try LocalAssetURLProtocol.configureCachedBundle(
+        cacheRequestJson: cacheRequestJson,
+        basicAuthCredential: dictionary("basicAuthCredential"),
+        cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+        registryId: protocolRegistryId
+      )
+    else { return false }
+    guard let cachedUrl = URL(string: cached.baseUrl) else {
+      throw runtimeError("The cached document URL is invalid.")
+    }
+    if cachedUrl.scheme == "https",
+      !privateProtocolStatus.hasPrefix("Installed"),
+      !privateProtocolStatus.hasSuffix("already installed.")
+    {
+      throw runtimeError(privateProtocolStatus)
+    }
+    cancelRemoteCacheFallback()
+    usesRemoteCachePreferred = false
+    setRequestBodyCaptureEnabled(true)
+    if replacingRemoteLoad {
+      suppressNextLoadStart = true
+      webView.stopLoading()
+    }
+    baseUrl = cached.baseUrl
+    loadedDocumentId = documentId
+    webView.load(URLRequest(url: cachedUrl))
+    emit("localBundleActivated")
+    return true
+  }
+
+  @discardableResult
+  private func activateRemoteCacheFallback() -> Bool {
+    guard remoteCacheFallbackPending, let webView else { return false }
+    do {
+      return try loadCachedBundle(in: webView, replacingRemoteLoad: true)
+    } catch {
+      emitRuntimeError(error.localizedDescription)
+      return false
+    }
+  }
+
   private func loadDocument() throws {
     guard let webView else { return }
+    cancelRemoteCacheFallback()
+    suppressNextLoadStart = false
+    usesRemoteCachePreferred = false
     if !cacheRequestJson.isEmpty {
       let request = try decodeObject(cacheRequestJson)
       guard
@@ -543,28 +624,33 @@ final class LocalWebView: HybridLocalWebViewSpec {
       else {
         throw runtimeError("cacheRequestJson.virtualUrl must be a valid URL.")
       }
-      if let cached = try LocalAssetURLProtocol.configureCachedBundle(
-        cacheRequestJson: cacheRequestJson,
-        basicAuthCredential: dictionary("basicAuthCredential"),
-        cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
-        registryId: protocolRegistryId
-      ) {
-        guard let cachedUrl = URL(string: cached.baseUrl) else {
-          throw runtimeError("The cached document URL is invalid.")
-        }
-        if cachedUrl.scheme == "https",
-          !privateProtocolStatus.hasPrefix("Installed"),
-          !privateProtocolStatus.hasSuffix("already installed.")
+      let prefersWebViewCache = request["startupMode"] as? String == "webview-cache-first"
+      if prefersWebViewCache, dictionary("basicAuthCredential") == nil {
+        if Self.connectivity.isDefinitelyOffline,
+          try loadCachedBundle(in: webView, replacingRemoteLoad: false)
         {
-          throw runtimeError(privateProtocolStatus)
+          return
         }
-        baseUrl = cached.baseUrl
+        LocalAssetURLProtocol.preferSystemLoading(
+          baseUrl: requestedUrl,
+          cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+          registryId: protocolRegistryId
+        )
+        setRequestBodyCaptureEnabled(true)
+        baseUrl = requestedUrl
         loadedDocumentId = documentId
-        webView.load(URLRequest(url: cachedUrl))
-      } else {
+        usesRemoteCachePreferred = true
+        remoteCacheFallbackPending = true
+        webView.load(URLRequest(url: remoteUrl))
+      } else if try !loadCachedBundle(in: webView, replacingRemoteLoad: false) {
         baseUrl = requestedUrl
         if dictionary("basicAuthCredential") == nil {
-          LocalAssetURLProtocol.unregister(registryId: protocolRegistryId)
+          LocalAssetURLProtocol.preferSystemLoading(
+            baseUrl: requestedUrl,
+            cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+            registryId: protocolRegistryId
+          )
+          setRequestBodyCaptureEnabled(true)
         } else {
           _ = try LocalAssetURLProtocol.configure(
             assetsJson: "[]",
@@ -574,6 +660,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
             html: "",
             registryId: protocolRegistryId
           )
+          setRequestBodyCaptureEnabled(true)
         }
         loadedDocumentId = documentId
         webView.load(URLRequest(url: remoteUrl))
@@ -590,7 +677,12 @@ final class LocalWebView: HybridLocalWebViewSpec {
         // stay on WKWebView's ordinary network stack. With no registry for
         // this view, the process-wide custom protocol declines these HTTPS
         // requests.
-        LocalAssetURLProtocol.unregister(registryId: protocolRegistryId)
+        LocalAssetURLProtocol.preferSystemLoading(
+          baseUrl: urlString,
+          cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+          registryId: protocolRegistryId
+        )
+        setRequestBodyCaptureEnabled(true)
       } else {
         // The private protocol's URLSession delegate is still required for
         // React Native WebView-compatible HTTP Basic authentication.
@@ -602,6 +694,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
           html: "",
           registryId: protocolRegistryId
         )
+        setRequestBodyCaptureEnabled(true)
       }
       var request = URLRequest(url: url)
       request.httpMethod = source["method"] as? String ?? "GET"
@@ -634,6 +727,7 @@ final class LocalWebView: HybridLocalWebViewSpec {
       html: html,
       registryId: protocolRegistryId
     )
+    setRequestBodyCaptureEnabled(hasLocalEntry || dictionary("basicAuthCredential") != nil)
     if url.scheme == "https",
       !privateProtocolStatus.hasPrefix("Installed"),
       !privateProtocolStatus.hasSuffix("already installed.")
@@ -705,18 +799,20 @@ final class LocalWebView: HybridLocalWebViewSpec {
       return
     }
 
-    controller.addScriptMessageHandler(
-      requestBodyProxy,
-      contentWorld: .page,
-      name: Self.requestBodyHandlerName
-    )
-    controller.addUserScript(
-      WKUserScript(
-        source: requestBodyCaptureScript(),
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: false
+    if requestBodyCaptureEnabled {
+      controller.addScriptMessageHandler(
+        requestBodyProxy,
+        contentWorld: .page,
+        name: Self.requestBodyHandlerName
       )
-    )
+      controller.addUserScript(
+        WKUserScript(
+          source: requestBodyCaptureScript(),
+          injectionTime: .atDocumentStart,
+          forMainFrameOnly: false
+        )
+      )
+    }
 
     controller.add(messageProxy, name: Self.historyHandlerName)
     controller.addUserScript(
@@ -832,6 +928,12 @@ final class LocalWebView: HybridLocalWebViewSpec {
         )
       )
     }
+  }
+
+  private func setRequestBodyCaptureEnabled(_ enabled: Bool) {
+    guard requestBodyCaptureEnabled != enabled else { return }
+    requestBodyCaptureEnabled = enabled
+    installUserScripts()
   }
 
   private func observeProgress() {
@@ -975,10 +1077,15 @@ final class LocalWebView: HybridLocalWebViewSpec {
   }
 
   fileprivate func didStartNavigation() {
+    if suppressNextLoadStart {
+      suppressNextLoadStart = false
+      return
+    }
     emit("loadStart")
   }
 
   fileprivate func didFinishNavigation() {
+    cancelRemoteCacheFallback()
     synchronizeCookiesBack()
     if boolean("ignoreSilentHardwareSwitch", false) {
       startSilentAudio()
@@ -991,6 +1098,10 @@ final class LocalWebView: HybridLocalWebViewSpec {
     if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
       return
     }
+    if activateRemoteCacheFallback() {
+      return
+    }
+    cancelRemoteCacheFallback()
     emit(
       "error",
       extra: [

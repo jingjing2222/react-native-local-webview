@@ -227,6 +227,7 @@ describe('resolveWebBundle', () => {
       cacheDirectory: '/documents/origin',
       cachePolicy: { maxBytes: 1234, maxGenerations: 3, maxInlineBytes: 567 },
       generationId: '1-2-12345678-90abcdef',
+      startupMode: 'webview-cache-first',
       trustedAssetOrigins: ['https://cdn.example'],
       validationMode: 'release-etag',
       virtualUrl: ENTRY,
@@ -236,6 +237,7 @@ describe('resolveWebBundle', () => {
       cacheDirectory: '/documents/origin',
       generationId: '1-2-12345678-90abcdef',
       maxBytes: 1234,
+      startupMode: 'webview-cache-first',
       validationMode: 'release-etag',
       virtualUrl: ENTRY,
     });
@@ -265,6 +267,32 @@ describe('resolveWebBundle', () => {
       'document.body.dataset.version'
     );
     expect(progress.at(-1)).toContain('Committing');
+  });
+
+  it('publishes an inline-only release without retained asset files or redundant metadata', async () => {
+    const bundle = await resolveWebBundle({
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+    const generationDirectory = bundle.sourcePath.replace('/index.html', '');
+    const manifest = JSON.parse(decoder.decode(file(`${generationDirectory}/manifest.json`))) as {
+      downloadedAssets: string[];
+      remoteAssets: Array<{ delivery: string; localFile?: string; url: string }>;
+    };
+    const generationFiles = [...storage.files.keys()]
+      .filter((path) => path.startsWith(`${generationDirectory}/`))
+      .map((path) => path.slice(generationDirectory.length + 1))
+      .sort();
+
+    expect(generationFiles).toEqual(['index.html', 'manifest.json']);
+    expect(storage.directories.has(`${generationDirectory}/assets`)).toBe(false);
+    expect(manifest.downloadedAssets).toEqual([ENTRY, SCRIPT]);
+    expect(manifest.remoteAssets).toEqual([
+      expect.objectContaining({ delivery: 'inline', url: ENTRY }),
+    ]);
+    expect(await readMirroredWebBundle(bundle.sourcePath)).toContain(
+      'document.body.dataset.version'
+    );
   });
 
   it('isolates origins that collide under filename character replacement', async () => {
@@ -367,6 +395,12 @@ describe('resolveWebBundle', () => {
       generationId: first.generationId,
       usedCachedBundle: true,
     });
+    expect(second.localAssets[wasmUrl]).toMatchObject({
+      mediaType: 'application/wasm',
+    });
+    expect(second.localAssets[wasmUrl]?.path).toContain(
+      `/generations/${first.generationId}/assets/`
+    );
     expect(storage.requests).toEqual([{ etag: '"entry-1"', url: ENTRY }]);
     expect(localHashCalls).toEqual([]);
   });
@@ -995,11 +1029,23 @@ describe('resolveWebBundle', () => {
   it('uses the last verified generation when revalidation is offline', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
     storage.responses.set(ENTRY, { error: new Error('offline') });
+    const fallbacks: Array<{ error: unknown; generationId: string }> = [];
 
-    const second = await resolveWebBundle({ virtualUrl: ENTRY });
+    const second = await resolveWebBundle({
+      onRevalidationFallback: (bundle, error) => {
+        fallbacks.push({ error, generationId: bundle.generationId });
+      },
+      virtualUrl: ENTRY,
+    });
 
     expect(second.generationId).toBe(first.generationId);
     expect(second.usedCachedBundle).toBe(true);
+    expect(fallbacks).toEqual([
+      {
+        error: expect.objectContaining({ message: 'offline' }),
+        generationId: first.generationId,
+      },
+    ]);
   });
 
   it('reports a cache miss or verified generation before starting network work', async () => {

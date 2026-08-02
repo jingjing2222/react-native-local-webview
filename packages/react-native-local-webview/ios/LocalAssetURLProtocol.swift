@@ -151,6 +151,7 @@ final class LocalAssetURLProtocol: URLProtocol {
   private static var registries = [String: URLProtocolRegistry]()
   private static var registryOrder = [String]()
   private static var requestBodies = [String: URLProtocolRequestBody]()
+  private static var systemLoadingOrigins = [String: String]()
 
   private let cancellationLock = NSLock()
   private var cancelled = false
@@ -280,7 +281,11 @@ final class LocalAssetURLProtocol: URLProtocol {
         request.validationMode != "release-etag" || !(manifest.bundleEtag ?? "").isEmpty
       else { continue }
       let sourceURL = generationDirectory.appendingPathComponent("index.html")
-      guard let sourceData = try? Data(contentsOf: sourceURL) else { continue }
+      guard
+        let sourceValues = try? sourceURL.resourceValues(forKeys: [.fileSizeKey]),
+        let sourceSize = sourceValues.fileSize,
+        sourceSize >= 0
+      else { continue }
       var assets = [URLProtocolAssetDescriptor]()
       var valid = true
       for asset in manifest.remoteAssets where asset.delivery == "file" {
@@ -322,7 +327,7 @@ final class LocalAssetURLProtocol: URLProtocol {
           path: sourceURL.path,
           responseHeaders: [:],
           responseUrl: runtimeURL,
-          size: Double(sourceData.count)
+          size: Double(sourceSize)
         )
       )
       _ = register(
@@ -330,7 +335,7 @@ final class LocalAssetURLProtocol: URLProtocol {
         baseUrl: runtimeURL,
         basicAuthCredential: basicAuthCredential,
         cookieStore: cookieStore,
-        entryData: sourceData,
+        entryData: nil,
         registryId: registryId
       )
       return CachedDocument(baseUrl: runtimeURL)
@@ -343,7 +348,7 @@ final class LocalAssetURLProtocol: URLProtocol {
     baseUrl: String,
     basicAuthCredential: [String: Any]?,
     cookieStore: WKHTTPCookieStore,
-    entryData: Data,
+    entryData: Data?,
     registryId: String
   ) -> Bool {
     var next = [String: URLProtocolAssetDescriptor]()
@@ -381,6 +386,7 @@ final class LocalAssetURLProtocol: URLProtocol {
       entryUrl: hasEntry ? normalizedEntryUrl : nil,
       origins: nextOrigins
     )
+    systemLoadingOrigins.removeValue(forKey: registryId)
     registryOrder.removeAll { $0 == registryId }
     registryOrder.append(registryId)
     stateLock.unlock()
@@ -435,6 +441,40 @@ final class LocalAssetURLProtocol: URLProtocol {
     stateLock.lock()
     registries.removeValue(forKey: registryId)
     registryOrder.removeAll { $0 == registryId }
+    systemLoadingOrigins.removeValue(forKey: registryId)
+    let bodyFiles = requestBodies.values
+      .filter { $0.ownerId == registryId }
+      .map(\.fileUrl)
+    requestBodies = requestBodies.filter { $0.value.ownerId != registryId }
+    stateLock.unlock()
+    for fileUrl in bodyFiles {
+      try? FileManager.default.removeItem(at: fileUrl)
+    }
+  }
+
+  static func preferSystemLoading(
+    baseUrl: String,
+    cookieStore: WKHTTPCookieStore,
+    registryId: String
+  ) {
+    let preferredOrigin = origin(of: baseUrl)
+    stateLock.lock()
+    registryOrder.removeAll { $0 == registryId }
+    if let preferredOrigin {
+      systemLoadingOrigins[registryId] = preferredOrigin
+      registries[registryId] = URLProtocolRegistry(
+        assets: [:],
+        basicAuthCredential: nil,
+        cookieStore: cookieStore,
+        entryData: nil,
+        entryUrl: nil,
+        origins: [preferredOrigin]
+      )
+      registryOrder.append(registryId)
+    } else {
+      systemLoadingOrigins.removeValue(forKey: registryId)
+      registries.removeValue(forKey: registryId)
+    }
     let bodyFiles = requestBodies.values
       .filter { $0.ownerId == registryId }
       .map(\.fileUrl)
@@ -535,7 +575,7 @@ final class LocalAssetURLProtocol: URLProtocol {
     guard let url = request.url, url.scheme?.lowercased() == "https" else {
       return false
     }
-    return registry(for: url) != nil
+    return registry(for: request) != nil
   }
 
   override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -554,7 +594,7 @@ final class LocalAssetURLProtocol: URLProtocol {
       client?.urlProtocol(self, didFailWithError: runtimeError("Missing asset URL."))
       return
     }
-    let registry = Self.registry(for: url)
+    let registry = Self.registry(for: request)
     requestBasicAuthCredential = registry?.basicAuthCredential
     requestCookieStore = registry?.cookieStore
     let method = request.httpMethod?.uppercased() ?? "GET"
@@ -565,12 +605,13 @@ final class LocalAssetURLProtocol: URLProtocol {
     }
 
     let item = DispatchWorkItem { [weak self] in
-      if registry?.entryUrl == Self.normalized(url.absoluteString),
+      let isEntry = registry?.entryUrl == Self.normalized(url.absoluteString)
+      if isEntry,
         let data = registry?.entryData
       {
         self?.serve(data, mediaType: asset.mediaType, requestUrl: url)
       } else {
-        self?.serve(asset, requestUrl: url)
+        self?.serve(asset, requestUrl: url, rateLimited: !isEntry)
       }
     }
     workItem = item
@@ -587,7 +628,11 @@ final class LocalAssetURLProtocol: URLProtocol {
     removeNetworkBodyFile()
   }
 
-  private func serve(_ asset: URLProtocolAssetDescriptor, requestUrl: URL) {
+  private func serve(
+    _ asset: URLProtocolAssetDescriptor,
+    requestUrl: URL,
+    rateLimited: Bool = true
+  ) {
     do {
       let fileUrl = URL(fileURLWithPath: asset.path)
       let values = try fileUrl.resourceValues(forKeys: [.fileSizeKey])
@@ -655,12 +700,14 @@ final class LocalAssetURLProtocol: URLProtocol {
           // NSURLProtocol has no consumer-backpressure signal. Without a
           // bounded producer, a fast local disk can enqueue an entire Unity
           // payload in WebKit before the content process consumes it.
-          let targetElapsed =
-            Double(deliveredBytes) / Double(Self.localStreamBytesPerSecond)
-          let delay =
-            targetElapsed - (ProcessInfo.processInfo.systemUptime - streamStartedAt)
-          if delay > 0 {
-            Thread.sleep(forTimeInterval: delay)
+          if rateLimited {
+            let targetElapsed =
+              Double(deliveredBytes) / Double(Self.localStreamBytesPerSecond)
+            let delay =
+              targetElapsed - (ProcessInfo.processInfo.systemUptime - streamStartedAt)
+            if delay > 0 {
+              Thread.sleep(forTimeInterval: delay)
+            }
           }
         }
       }
@@ -802,7 +849,9 @@ final class LocalAssetURLProtocol: URLProtocol {
       delegate: delegate,
       delegateQueue: nil
     )
-    let task = session.dataTask(with: networkRequest)
+    let task = networkRequest.httpBodyStream == nil
+      ? session.dataTask(with: networkRequest)
+      : session.uploadTask(withStreamedRequest: networkRequest)
     networkSessionDelegate = delegate
     networkSession = session
     networkTask = task
@@ -966,11 +1015,26 @@ final class LocalAssetURLProtocol: URLProtocol {
     return components.url?.absoluteString ?? url
   }
 
-  private static func registry(for url: URL) -> URLProtocolRegistry? {
+  private static func registry(for request: URLRequest) -> URLProtocolRegistry? {
+    guard let url = request.url else { return nil }
     let normalizedUrl = normalized(url.absoluteString)
     let requestOrigin = origin(of: url)
+    let method = request.httpMethod?.uppercased() ?? "GET"
     stateLock.lock()
     defer { stateLock.unlock() }
+    if let requestOrigin,
+      systemLoadingOrigins.values.contains(requestOrigin)
+    {
+      guard method != "GET", method != "HEAD" else { return nil }
+      for registryId in registryOrder.reversed() {
+        guard
+          systemLoadingOrigins[registryId] == requestOrigin,
+          let registry = registries[registryId]
+        else { continue }
+        return registry
+      }
+      return nil
+    }
     // NSURLProtocol registration is process-wide. Prefer an exact local asset
     // match before selecting an origin context for network pass-through, so a
     // newer view at the same origin cannot steal unrelated local paths.

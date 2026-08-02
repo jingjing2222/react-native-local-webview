@@ -108,6 +108,7 @@ type EventEnvelope = {
     | 'fileDownload'
     | 'httpError'
     | 'load'
+    | 'localBundleActivated'
     | 'loadProgress'
     | 'loadStart'
     | 'loadSubResourceError'
@@ -357,6 +358,8 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
     const hostRef = useRef<LocalWebViewHostRef | undefined>(undefined);
     const leaseReleaseRef = useRef<(() => void) | undefined>(undefined);
     const bundleRef = useRef<MirroredWebBundle | undefined>(undefined);
+    const localBundleActivationPendingRef = useRef(false);
+    const localBundleReadyGenerationRef = useRef<string | undefined>(undefined);
     const documentEpochRef = useRef(0);
     const rollbackAttemptedRef = useRef(false);
     const rollbackRef = useRef<() => Promise<boolean>>(async () => false);
@@ -535,6 +538,18 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
           current.onLoadEnd?.(event as WebViewNavigationEvent);
           current.onNavigationStateChange?.(envelope.nativeEvent as unknown as WebViewNavigation);
           return;
+        case 'localBundleActivated': {
+          const bundle = bundleRef.current;
+          if (!bundle) {
+            localBundleActivationPendingRef.current = true;
+            return;
+          }
+          if (localBundleReadyGenerationRef.current !== bundle.generationId) {
+            localBundleReadyGenerationRef.current = bundle.generationId;
+            current.onBundleReady?.(bundle);
+          }
+          return;
+        }
         case 'loadProgress':
           current.onLoadProgress?.(event as WebViewProgressEvent);
           return;
@@ -667,6 +682,7 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
           cacheDirectory: cacheRoot,
           cachePolicy,
           generationId: previous.generationId,
+          startupMode: 'local-first',
           trustedAssetOrigins,
           validationMode,
           virtualUrl: effectiveVirtualUrl,
@@ -726,6 +742,8 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
       const controller = new AbortController();
       const documentEpoch = ++documentEpochRef.current;
       bundleRef.current = undefined;
+      localBundleActivationPendingRef.current = false;
+      localBundleReadyGenerationRef.current = undefined;
       rollbackAttemptedRef.current = false;
       setDocument(undefined);
       setError(undefined);
@@ -776,6 +794,10 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
                 maxInlineBytes: cacheMaxInlineBytes,
               },
         trustedAssetOrigins: JSON.parse(trustedAssetOriginsKey) as string[],
+        startupMode:
+          Platform.OS === 'ios' && !allowContentSecurityPolicyBypass
+            ? 'webview-cache-first'
+            : 'local-first',
         validationMode,
         virtualUrl: nextVirtualUrl,
       });
@@ -806,10 +828,14 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
       let initialVisibleLoad: Promise<void> | undefined;
       if (sourcePath === undefined) {
         initialVisibleLoad = waitForVisibleDocument();
-        setStatus('Opening the durable local bundle…');
+        setStatus(
+          Platform.OS === 'ios'
+            ? 'Opening the WebKit cache with a durable local fallback…'
+            : 'Opening the durable local bundle…'
+        );
         setDocument(cacheDocument(cacheRequest));
       }
-      const registerLocalBundle = (bundle: MirroredWebBundle): void => {
+      const registerLocalBundle = (bundle: MirroredWebBundle, notifyBundleReady = true): void => {
         const preparedLease =
           bundle.generationId === 'external' || cacheRoot === undefined
             ? undefined
@@ -821,28 +847,38 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
         leaseReleaseRef.current?.();
         leaseReleaseRef.current = preparedLease;
         bundleRef.current = bundle;
-        callbacksRef.current.onBundleReady?.(bundle);
+        if (notifyBundleReady || localBundleActivationPendingRef.current) {
+          localBundleActivationPendingRef.current = false;
+          if (localBundleReadyGenerationRef.current !== bundle.generationId) {
+            localBundleReadyGenerationRef.current = bundle.generationId;
+            callbacksRef.current.onBundleReady?.(bundle);
+          }
+        }
       };
       const showRemoteDocument = (): void => {
         if (!active || documentEpochRef.current !== documentEpoch) return;
         leaseReleaseRef.current?.();
         leaseReleaseRef.current = undefined;
         bundleRef.current = undefined;
+        localBundleActivationPendingRef.current = false;
+        localBundleReadyGenerationRef.current = undefined;
         rollbackAttemptedRef.current = false;
         setStatus('Loading the remote site while its durable copy is saved in the background…');
         setDocument(directSourceDocument({ uri: nextVirtualUrl }));
       };
       const showValidatedGeneration = (bundle: MirroredWebBundle): void => {
-        registerLocalBundle(bundle);
+        registerLocalBundle(bundle, Platform.OS !== 'ios');
         if (bundle.generationId === publishedGenerationId) return;
         setDocument(
           cacheDocument({
             ...cacheRequest,
             generationId: bundle.generationId,
+            startupMode: 'local-first',
           })
         );
       };
 
+      let backgroundResolutionTimer: ReturnType<typeof setTimeout> | undefined;
       if (sourcePath !== undefined) {
         void readMirroredWebBundle(sourcePath, cacheAdapter)
           .then((sourceHtml) => {
@@ -876,64 +912,83 @@ const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewPr
             });
           });
       } else {
-        void resolveWebBundle({
-          cacheAdapter,
-          allowContentSecurityPolicyBypass,
-          cacheDirectory,
-          cachePolicy:
-            cacheMaxBytes === undefined &&
-            cacheMaxGenerations === undefined &&
-            cacheMaxInlineBytes === undefined
-              ? undefined
-              : {
-                  maxBytes: cacheMaxBytes,
-                  maxGenerations: cacheMaxGenerations,
-                  maxInlineBytes: cacheMaxInlineBytes,
-                },
-          forceRefresh,
-          onPublishedBundle: async (publishedBundle) => {
-            publishedGenerationId = publishedBundle?.generationId;
-            if (publishedBundle) {
-              registerLocalBundle(publishedBundle);
-              await initialVisibleLoad;
-            } else {
-              // The native loader already falls back to this URL on a cache miss.
-              await initialVisibleLoad;
-            }
-          },
-          onCachedBundle: async (cachedBundle) => {
-            if (cachedBundle) {
-              if (cachedBundle.generationId === publishedGenerationId) return;
+        backgroundResolutionTimer = setTimeout(() => {
+          if (!active || controller.signal.aborted) return;
+          void resolveWebBundle({
+            cacheAdapter,
+            allowContentSecurityPolicyBypass,
+            cacheDirectory,
+            cachePolicy:
+              cacheMaxBytes === undefined &&
+              cacheMaxGenerations === undefined &&
+              cacheMaxInlineBytes === undefined
+                ? undefined
+                : {
+                    maxBytes: cacheMaxBytes,
+                    maxGenerations: cacheMaxGenerations,
+                    maxInlineBytes: cacheMaxInlineBytes,
+                  },
+            forceRefresh,
+            onPublishedBundle: async (publishedBundle) => {
+              publishedGenerationId = publishedBundle?.generationId;
+              if (publishedBundle) {
+                registerLocalBundle(publishedBundle, Platform.OS !== 'ios');
+                await initialVisibleLoad;
+              } else {
+                // The native loader already falls back to this URL on a cache miss.
+                await initialVisibleLoad;
+              }
+            },
+            onCachedBundle: async (cachedBundle) => {
+              if (cachedBundle) {
+                if (cachedBundle.generationId === publishedGenerationId) return;
+                const loaded = waitForVisibleDocument();
+                showValidatedGeneration(cachedBundle);
+                await loaded;
+              } else if (publishedGenerationId === undefined) {
+                // The native cache miss is already displaying the remote document.
+              } else {
+                showRemoteDocument();
+              }
+            },
+            onProgress: (message) => {
+              if (active) setStatus(message);
+            },
+            onRevalidationFallback: async (cachedBundle) => {
+              if (Platform.OS !== 'ios') return;
+              registerLocalBundle(cachedBundle, false);
+              if (localBundleReadyGenerationRef.current === cachedBundle.generationId) return;
               const loaded = waitForVisibleDocument();
-              showValidatedGeneration(cachedBundle);
+              setStatus('The release check failed. Opening the durable local bundle…');
+              setDocument(
+                cacheDocument({
+                  ...cacheRequest,
+                  generationId: cachedBundle.generationId,
+                  startupMode: 'local-first',
+                })
+              );
               await loaded;
-            } else if (publishedGenerationId === undefined) {
-              // The native cache miss is already displaying the remote document.
-            } else {
-              showRemoteDocument();
-            }
-          },
-          onProgress: (message) => {
-            if (active) setStatus(message);
-          },
-          signal: controller.signal,
-          trustedAssetOrigins: JSON.parse(trustedAssetOriginsKey) as string[],
-          validationMode,
-          virtualUrl: nextVirtualUrl,
-        })
-          .then((bundle) => {
-            if (!active || documentEpochRef.current !== documentEpoch) return;
-            callbacksRef.current.onBundleStored?.(bundle);
+            },
+            signal: controller.signal,
+            trustedAssetOrigins: JSON.parse(trustedAssetOriginsKey) as string[],
+            validationMode,
+            virtualUrl: nextVirtualUrl,
           })
-          .catch((reason: unknown) => {
-            if (!active || controller.signal.aborted) return;
-            const nextError = reason instanceof Error ? reason : new Error(String(reason));
-            callbacksRef.current.onBundleError?.(nextError);
-          });
+            .then((bundle) => {
+              if (!active || documentEpochRef.current !== documentEpoch) return;
+              callbacksRef.current.onBundleStored?.(bundle);
+            })
+            .catch((reason: unknown) => {
+              if (!active || controller.signal.aborted) return;
+              const nextError = reason instanceof Error ? reason : new Error(String(reason));
+              callbacksRef.current.onBundleError?.(nextError);
+            });
+        }, 0);
       }
 
       return () => {
         active = false;
+        if (backgroundResolutionTimer) clearTimeout(backgroundResolutionTimer);
         backgroundWorkGateRef.current?.release();
         controller.abort();
         documentEpochRef.current += 1;
