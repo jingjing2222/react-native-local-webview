@@ -32,7 +32,7 @@ export type CachePolicy = {
   maxBytes?: number;
   /**
    * Maximum raw bytes for a resource that must be embedded into the HTML as a
-   * data URL. Larger runtime data/WASM files use the streaming bridge instead.
+   * data URL. Larger runtime data/WASM files remain as streamable files.
    *
    * @default 33554432 (32 MiB)
    */
@@ -44,6 +44,8 @@ export type CachePolicy = {
    */
   maxGenerations?: number;
 };
+
+export type WebBundleValidationMode = 'content-hash' | 'release-etag';
 
 export type MirroredWebBundle = {
   /**
@@ -88,11 +90,11 @@ export type ResolveWebBundleOptions = {
   forceRefresh?: boolean;
   /**
    * Called as soon as an atomically published generation can be identified
-   * from cache state and its entry path. Payload hashes are verified
-   * afterwards, before `onCachedBundle` is called.
+   * from cache state and its entry path. The configured validation strategy
+   * runs afterwards, before `onCachedBundle` is called.
    *
    * This latency-sensitive hook lets a WebView start a warm local navigation
-   * without waiting for every large WebGL payload to be hashed again.
+   * without waiting for validation of every large WebGL payload.
    */
   onPublishedBundle?: (bundle: MirroredWebBundle | undefined) => Promise<void> | void;
   /**
@@ -111,6 +113,14 @@ export type ResolveWebBundleOptions = {
    * download boundary. The entry origin is always trusted.
    */
   trustedAssetOrigins?: string[];
+  /**
+   * Select how a cached release is validated. `release-etag` requires the
+   * entry ETag to represent the complete release and avoids warm local hashes
+   * and per-resource revalidation.
+   *
+   * @default 'content-hash'
+   */
+  validationMode?: WebBundleValidationMode;
   virtualUrl: string;
 };
 
@@ -132,6 +142,7 @@ type RemoteAssetMetadata = {
 };
 
 type GenerationManifest = {
+  bundleEtag?: string;
   createdAt: string;
   downloadedAssets: string[];
   documentFragment: string;
@@ -144,6 +155,7 @@ type GenerationManifest = {
   securityPolicyFingerprint: string;
   sourceSha256: string;
   totalBytes: number;
+  validationMode: WebBundleValidationMode;
 };
 
 type GenerationSummary = {
@@ -179,6 +191,7 @@ type DownloadResult =
     };
 
 type PreparedBundle = {
+  bundleEtag?: string;
   downloadedAssets: string[];
   documentFragment: string;
   documentFragmentInherited: boolean;
@@ -187,7 +200,7 @@ type PreparedBundle = {
   remoteAssets: LoadedResource[];
 };
 
-const CACHE_FORMAT_VERSION = 12;
+const CACHE_FORMAT_VERSION = 14;
 const CACHE_STATE_OVERHEAD_BYTES_PER_GENERATION = 256;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_GENERATIONS = 2;
@@ -211,6 +224,26 @@ type ResolvedSecurityPolicy = {
   fingerprint: string;
   trustedOrigins: string[];
 };
+
+export type WebBundleCacheRequest = {
+  cacheDirectory: string;
+  generationId?: string;
+  maxBytes: number;
+  securityPolicyFingerprint: string;
+  validationMode: WebBundleValidationMode;
+  virtualUrl: string;
+};
+
+class RequiredReleaseEtagError extends Error {
+  override readonly name = 'RequiredReleaseEtagError';
+}
+
+function requiredReleaseEtag(value: string | undefined, url: string): string {
+  if (value && isSafeRuntimeHeaderValue(value)) return value;
+  throw new RequiredReleaseEtagError(
+    `validationMode="release-etag" requires the entry response to include an ETag: ${url}`
+  );
+}
 
 async function mkdir(cacheAdapter: LocalWebViewCacheAdapter, path: string): Promise<void> {
   if (await cacheAdapter.exists(path)) return;
@@ -466,6 +499,88 @@ function resolveSecurityPolicy({
   };
 }
 
+function resolveBundlePolicy({
+  allowContentSecurityPolicyBypass = false,
+  cachePolicy,
+  trustedAssetOrigins,
+  validationMode = 'content-hash',
+  virtualUrl,
+}: Pick<
+  ResolveWebBundleOptions,
+  | 'allowContentSecurityPolicyBypass'
+  | 'cachePolicy'
+  | 'trustedAssetOrigins'
+  | 'validationMode'
+  | 'virtualUrl'
+>): {
+  generationPolicyFingerprint: string;
+  policy: Required<CachePolicy>;
+  security: ResolvedSecurityPolicy;
+} {
+  if (validationMode !== 'content-hash' && validationMode !== 'release-etag') {
+    throw new Error('validationMode must be "content-hash" or "release-etag"');
+  }
+  const security = resolveSecurityPolicy({
+    allowContentSecurityPolicyBypass,
+    trustedAssetOrigins,
+    virtualUrl,
+  });
+  const policy = {
+    maxBytes: cachePolicy?.maxBytes ?? DEFAULT_MAX_BYTES,
+    maxGenerations: cachePolicy?.maxGenerations ?? DEFAULT_MAX_GENERATIONS,
+    maxInlineBytes: cachePolicy?.maxInlineBytes ?? DEFAULT_MAX_INLINE_BYTES,
+  };
+  if (
+    !Number.isSafeInteger(policy.maxBytes) ||
+    policy.maxBytes <= 0 ||
+    !Number.isSafeInteger(policy.maxGenerations) ||
+    policy.maxGenerations < 1 ||
+    !Number.isSafeInteger(policy.maxInlineBytes) ||
+    policy.maxInlineBytes < 1
+  ) {
+    throw new Error(
+      'cachePolicy requires maxBytes > 0, maxGenerations >= 1, and maxInlineBytes > 0; all must be positive safe integers'
+    );
+  }
+  return {
+    generationPolicyFingerprint: sha256Text(
+      JSON.stringify({
+        maxInlineBytes: policy.maxInlineBytes,
+        security: security.fingerprint,
+        validationMode,
+      })
+    ),
+    policy,
+    security,
+  };
+}
+
+export function createWebBundleCacheRequest({
+  cacheDirectory,
+  generationId,
+  ...options
+}: Pick<
+  ResolveWebBundleOptions,
+  | 'allowContentSecurityPolicyBypass'
+  | 'cachePolicy'
+  | 'trustedAssetOrigins'
+  | 'validationMode'
+  | 'virtualUrl'
+> & {
+  cacheDirectory: string;
+  generationId?: string;
+}): WebBundleCacheRequest {
+  const { generationPolicyFingerprint, policy } = resolveBundlePolicy(options);
+  return {
+    cacheDirectory,
+    generationId,
+    maxBytes: policy.maxBytes,
+    securityPolicyFingerprint: generationPolicyFingerprint,
+    validationMode: options.validationMode ?? 'content-hash',
+    virtualUrl: options.virtualUrl,
+  };
+}
+
 function assertTrustedAssetUrl(
   value: string,
   policy: ResolvedSecurityPolicy,
@@ -700,7 +815,7 @@ async function downloadResource(
   etag?: string,
   {
     accountDownloadedBytes,
-    completeBridgeIntegrity = true,
+    completeFileIntegrity = true,
     delivery = 'inline',
     documentRequestUrl,
     integrity: integrityMetadata,
@@ -709,7 +824,7 @@ async function downloadResource(
     sameOriginRedirectsOnly = false,
   }: ResourceLoadOptions & {
     accountDownloadedBytes?: (size: number, url: string, delivery: ResourceDelivery) => void;
-    completeBridgeIntegrity?: boolean;
+    completeFileIntegrity?: boolean;
     documentRequestUrl?: string;
     maxDownloadBytes?: number;
     preserveFile?: boolean;
@@ -720,7 +835,7 @@ async function downloadResource(
   throwIfAborted(signal);
   const temporaryPath = `${stagingDirectory}/download-${Date.now()}-${temporaryFileSequence++}`;
   const hashAlgorithms: Array<'sha256' | 'sha384' | 'sha512'> = ['sha256'];
-  if (delivery === 'bridge' && completeBridgeIntegrity) {
+  if (delivery === 'file' && completeFileIntegrity) {
     hashAlgorithms.push('sha384', 'sha512');
   } else {
     const strongestIntegrity = strongestIntegrityAlgorithm(integrityMetadata);
@@ -822,7 +937,7 @@ async function downloadResource(
         ].includes(declaredMediaType))
         ? inferredMediaType
         : declaredMediaType || inferredMediaType;
-    keepFile = delivery === 'bridge' && preserveFile;
+    keepFile = delivery === 'file' && preserveFile;
     return {
       asset: {
         content,
@@ -833,7 +948,7 @@ async function downloadResource(
         encoding: 'base64',
         etag: header(result.headers, 'etag'),
         integrity,
-        localPath: delivery === 'bridge' && preserveFile ? temporaryPath : undefined,
+        localPath: delivery === 'file' && preserveFile ? temporaryPath : undefined,
         mediaType,
         redirected: result.redirected,
         responseHeaders: runtimeResponseHeaders(result.headers),
@@ -878,7 +993,7 @@ async function ensureResourceIntegrity(
 
 function metadataForAsset(asset: LoadedResource, localFile?: string): RemoteAssetMetadata {
   if (
-    (asset.delivery ?? 'inline') === 'bridge' &&
+    (asset.delivery ?? 'inline') === 'file' &&
     (!asset.integrity?.sha256 || !asset.integrity.sha384 || !asset.integrity.sha512)
   ) {
     throw new Error(`Complete Subresource Integrity metadata is unavailable for ${asset.url}`);
@@ -968,7 +1083,7 @@ function isCacheState(value: unknown): value is CacheState {
 function isRemoteAssetMetadata(value: unknown): value is RemoteAssetMetadata {
   if (
     !isRecord(value) ||
-    (value.delivery !== 'inline' && value.delivery !== 'bridge') ||
+    (value.delivery !== 'inline' && value.delivery !== 'file') ||
     !isRecord(value.integrity) ||
     typeof value.mediaType !== 'string' ||
     typeof value.redirected !== 'boolean' ||
@@ -1009,6 +1124,10 @@ function isGenerationManifest(value: unknown, generationId: string): value is Ge
     isRecord(value) &&
     value.formatVersion === CACHE_FORMAT_VERSION &&
     value.generationId === generationId &&
+    (value.validationMode === 'release-etag' || value.validationMode === 'content-hash') &&
+    (value.bundleEtag === undefined || typeof value.bundleEtag === 'string') &&
+    (value.validationMode !== 'release-etag' ||
+      (typeof value.bundleEtag === 'string' && value.bundleEtag.length > 0)) &&
     Array.isArray(value.downloadedAssets) &&
     value.downloadedAssets.every((url) => typeof url === 'string') &&
     typeof value.documentFragment === 'string' &&
@@ -1085,9 +1204,11 @@ async function validGeneration(
   ) {
     return undefined;
   }
-  if ((await canonicalFileHash(cacheAdapter, path, 'sha256')) !== manifest.sourceSha256) {
+  if (
+    manifest.validationMode === 'content-hash' &&
+    (await canonicalFileHash(cacheAdapter, path, 'sha256')) !== manifest.sourceSha256
+  )
     return undefined;
-  }
   const verifiedLocalFiles = new Map<string, { sha256: string; size: number }>();
   for (const asset of manifest.remoteAssets) {
     if (!asset.localFile) continue;
@@ -1100,7 +1221,10 @@ async function validGeneration(
     if (!(await cacheAdapter.exists(localPath))) return undefined;
     const localStat = await cacheAdapter.stat(localPath);
     if (Number(localStat.size) !== asset.size) return undefined;
-    if ((await canonicalFileHash(cacheAdapter, localPath, 'sha256')) !== asset.sha256)
+    if (
+      manifest.validationMode === 'content-hash' &&
+      (await canonicalFileHash(cacheAdapter, localPath, 'sha256')) !== asset.sha256
+    )
       return undefined;
     verifiedLocalFiles.set(localPath, { sha256: asset.sha256, size: asset.size });
   }
@@ -1524,10 +1648,10 @@ async function commitGeneration(
   signal?: AbortSignal
 ): Promise<MirroredWebBundle> {
   throwIfAborted(signal);
-  const bridgeAssets = prepared.remoteAssets.filter((asset) => asset.delivery === 'bridge');
+  const fileAssets = prepared.remoteAssets.filter((asset) => asset.delivery === 'file');
   const payloadBytes =
     utf8ByteLength(prepared.html) +
-    [...new Map(bridgeAssets.map((asset) => [asset.sha256, asset])).values()].reduce(
+    [...new Map(fileAssets.map((asset) => [asset.sha256, asset])).values()].reduce(
       (sum, asset) => sum + asset.size,
       0
     );
@@ -1559,7 +1683,7 @@ async function commitGeneration(
   const generationDirectory = `${cacheDirectory}/generations/${generationId}`;
   const localFiles = new Map<string, string>();
   const finalSource = sourcePath(cacheDirectory, generationId);
-  for (const asset of bridgeAssets) {
+  for (const asset of fileAssets) {
     if (!asset.localPath) {
       throw new Error(`Local file is unavailable for streamed asset ${asset.url}`);
     }
@@ -1567,9 +1691,10 @@ async function commitGeneration(
   }
   const createdAt = new Date().toISOString();
   const remoteAssets = prepared.remoteAssets.map((asset) =>
-    metadataForAsset(asset, asset.delivery === 'bridge' ? localFiles.get(asset.sha256) : undefined)
+    metadataForAsset(asset, asset.delivery === 'file' ? localFiles.get(asset.sha256) : undefined)
   );
   const manifestForSize = (totalBytes: number): GenerationManifest => ({
+    bundleEtag: prepared.bundleEtag,
     createdAt,
     downloadedAssets: prepared.downloadedAssets,
     documentFragment: prepared.documentFragment,
@@ -1582,6 +1707,7 @@ async function commitGeneration(
     securityPolicyFingerprint,
     sourceSha256,
     totalBytes,
+    validationMode: prepared.bundleEtag ? 'release-etag' : 'content-hash',
   });
   const summaryForSize = (totalBytes: number): GenerationSummary => ({
     createdAt,
@@ -1609,7 +1735,7 @@ async function commitGeneration(
   try {
     await mkdir(cacheAdapter, generationDirectory);
     await mkdir(cacheAdapter, `${generationDirectory}/assets`);
-    for (const asset of bridgeAssets) {
+    for (const asset of fileAssets) {
       throwIfAborted(signal);
       const localFile = localFiles.get(asset.sha256)!;
       if (!(await cacheAdapter.exists(`${generationDirectory}/${localFile}`))) {
@@ -1685,6 +1811,7 @@ async function prepareByCrawling(
   security: ResolvedSecurityPolicy,
   maxBytes: number,
   maxInlineBytes: number,
+  validationMode: WebBundleValidationMode,
   onProgress?: (message: string) => void,
   signal?: AbortSignal
 ): Promise<PreparedBundle> {
@@ -1704,7 +1831,7 @@ async function prepareByCrawling(
     materializedBytes += size;
   };
   const accountDownloadedBytes = (size: number, url: string, delivery: ResourceDelivery): void => {
-    if (delivery === 'bridge') {
+    if (delivery === 'file') {
       reserveBytes(size, url);
       return;
     }
@@ -1726,7 +1853,7 @@ async function prepareByCrawling(
   };
   const remainingDownloadBytes = (delivery: ResourceDelivery): number => {
     const remaining = maxBytes - materializedBytes;
-    if (delivery === 'bridge') return remaining;
+    if (delivery === 'file') return remaining;
     // Inline resources transiently retain both the downloaded file and its
     // base64 representation. Find the largest raw response that can fit that
     // peak before allowing the cacheAdapter to start receiving it.
@@ -1748,7 +1875,7 @@ async function prepareByCrawling(
         throwIfAborted(signal);
         if (delivery === 'inline' && cached.content === undefined) {
           if (!cached.localPath) {
-            throw new Error(`Cached bridge asset has no local file: ${normalizedUrl}`);
+            throw new Error(`Cached file asset has no local file: ${normalizedUrl}`);
           }
           if (cached.size > maxInlineBytes) {
             throw new Error(
@@ -1760,7 +1887,7 @@ async function prepareByCrawling(
           cached.content = await cacheAdapter.readFile(cached.localPath, 'base64');
           throwIfAborted(signal);
         }
-        if (delivery === 'bridge' && !cached.localPath) {
+        if (delivery === 'file' && !cached.localPath) {
           if (cached.content === undefined) {
             throw new Error(`Cached inline asset has no readable content: ${normalizedUrl}`);
           }
@@ -1780,12 +1907,10 @@ async function prepareByCrawling(
           throwIfAborted(signal);
           const promotedSha256 = promotedHashes.sha256!;
           if (promotedSize !== cached.size || promotedSha256 !== cached.sha256) {
-            throw new Error(
-              `Promoted bridge asset failed integrity verification: ${normalizedUrl}`
-            );
+            throw new Error(`Promoted file asset failed integrity verification: ${normalizedUrl}`);
           }
           cached.localPath = promotedPath;
-          cached.delivery = 'bridge';
+          cached.delivery = 'file';
           cached.integrity ??= {};
           cached.integrity.sha256 ??= hexDigestToBase64(cached.sha256);
           cached.integrity.sha384 = hexDigestToBase64(promotedHashes.sha384!);
@@ -1813,7 +1938,7 @@ async function prepareByCrawling(
             documentRequestUrl: entryRequest ? url : undefined,
             integrity: options?.integrity,
             maxDownloadBytes,
-            preserveFile: delivery === 'bridge',
+            preserveFile: delivery === 'file',
             sameOriginRedirectsOnly: entryRequest,
           },
           signal
@@ -1847,6 +1972,10 @@ async function prepareByCrawling(
     };
     onProgress?.('Downloading entry HTML…');
     const entry = await load(virtualUrl);
+    const bundleEtag =
+      validationMode === 'release-etag'
+        ? requiredReleaseEtag(entry.etag, entry.responseUrl ?? entry.url)
+        : undefined;
     if (entry.content === undefined) {
       throw new Error('Downloaded entry HTML has no readable content');
     }
@@ -1873,6 +2002,7 @@ async function prepareByCrawling(
     });
     throwIfAborted(signal);
     return {
+      bundleEtag,
       downloadedAssets: [...cache.keys()],
       documentFragment: entryDocumentFragment,
       documentFragmentInherited: entryDocumentFragmentInherited,
@@ -1887,6 +2017,78 @@ async function prepareByCrawling(
       })
     );
     throw error;
+  }
+}
+
+async function revalidateBundleEtag(
+  cacheAdapter: LocalWebViewCacheAdapter,
+  stagingDirectory: string,
+  manifest: GenerationManifest,
+  requestedEntryUrl: string,
+  security: ResolvedSecurityPolicy,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const entry = manifest.remoteAssets.find((asset) => asset.url === manifest.entryUrl);
+  if (!entry) {
+    throw new RequiredReleaseEtagError(
+      `The cached generation has no entry metadata for ${manifest.entryUrl}`
+    );
+  }
+  const etag = requiredReleaseEtag(manifest.bundleEtag, manifest.entryUrl);
+  const temporaryPath = `${stagingDirectory}/revalidate-${Date.now()}-${temporaryFileSequence++}`;
+  let completedDownload:
+    | {
+        wroteFile?: boolean;
+      }
+    | undefined;
+  try {
+    let result: Awaited<ReturnType<typeof downloadWithoutRedirects>>;
+    try {
+      result = await downloadWithoutRedirects(
+        cacheAdapter,
+        requestedEntryUrl,
+        temporaryPath,
+        {
+          'Accept-Encoding': 'identity',
+          'Cache-Control': 'no-cache',
+          'If-None-Match': etag,
+        },
+        security,
+        true,
+        entry.size,
+        undefined,
+        signal
+      );
+    } catch (error) {
+      if (error instanceof LocalWebViewDownloadLimitError) return true;
+      throw error;
+    }
+    completedDownload = result;
+    throwIfAborted(signal);
+    if (result.status === 304) {
+      const responseEtag = header(result.headers, 'etag');
+      return (
+        (responseEtag !== undefined && responseEtag !== etag) ||
+        canonicalResourceUrl(result.documentUrl) !== canonicalResourceUrl(manifest.documentUrl) ||
+        result.documentFragmentInherited !== manifest.documentFragmentInherited ||
+        result.finalUrl !== entry.responseUrl ||
+        result.redirected !== entry.redirected
+      );
+    }
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`HTTP ${result.status} while revalidating ${manifest.entryUrl}`);
+    }
+    requiredReleaseEtag(header(result.headers, 'etag'), result.finalUrl);
+    return true;
+  } finally {
+    if (completedDownload?.wroteFile === true) {
+      await cacheAdapter.remove(temporaryPath);
+    } else if (
+      completedDownload?.wroteFile === undefined &&
+      (await cacheAdapter.exists(temporaryPath))
+    ) {
+      await cacheAdapter.remove(temporaryPath);
+    }
   }
 }
 
@@ -1918,8 +2120,8 @@ async function revalidateAssets(
         security,
         metadata.etag,
         {
-          completeBridgeIntegrity: false,
-          delivery: 'bridge',
+          completeFileIntegrity: false,
+          delivery: 'file',
           documentRequestUrl: isEntry ? requestedEntryUrl : undefined,
           maxDownloadBytes: metadata.size,
           sameOriginRedirectsOnly: isEntry,
@@ -2188,36 +2390,16 @@ async function resolveWebBundleUnlocked({
   onProgress,
   signal,
   trustedAssetOrigins,
+  validationMode = 'content-hash',
 }: ResolveWebBundleOptions): Promise<MirroredWebBundle> {
   throwIfAborted(signal);
-  const security = resolveSecurityPolicy({
+  const { generationPolicyFingerprint, policy, security } = resolveBundlePolicy({
     allowContentSecurityPolicyBypass,
+    cachePolicy,
     trustedAssetOrigins,
+    validationMode,
     virtualUrl,
   });
-  const policy = {
-    maxBytes: cachePolicy?.maxBytes ?? DEFAULT_MAX_BYTES,
-    maxGenerations: cachePolicy?.maxGenerations ?? DEFAULT_MAX_GENERATIONS,
-    maxInlineBytes: cachePolicy?.maxInlineBytes ?? DEFAULT_MAX_INLINE_BYTES,
-  };
-  if (
-    !Number.isSafeInteger(policy.maxBytes) ||
-    policy.maxBytes <= 0 ||
-    !Number.isSafeInteger(policy.maxGenerations) ||
-    policy.maxGenerations < 1 ||
-    !Number.isSafeInteger(policy.maxInlineBytes) ||
-    policy.maxInlineBytes < 1
-  ) {
-    throw new Error(
-      'cachePolicy requires maxBytes > 0, maxGenerations >= 1, and maxInlineBytes > 0; all must be positive safe integers'
-    );
-  }
-  const generationPolicyFingerprint = sha256Text(
-    JSON.stringify({
-      maxInlineBytes: policy.maxInlineBytes,
-      security: security.fingerprint,
-    })
-  );
   const generationValidationCache: GenerationValidationCache = new Map();
   cacheRuntimes.set(cacheDirectory, { cacheAdapter, policy });
   await mkdir(cacheAdapter, cacheDirectory);
@@ -2258,28 +2440,47 @@ async function resolveWebBundleUnlocked({
   let cached = forceRefresh ? undefined : availableCached;
   if (cached) {
     try {
-      onProgress?.('Revalidating every remote asset with ETag and SHA-256…');
-      const changed = await revalidateAssets(
-        cacheAdapter,
-        stagingDirectory,
-        cached.manifest.remoteAssets,
-        cached.manifest.entryUrl,
-        cached.bundle.baseUrl,
-        cached.manifest.documentFragmentInherited,
-        virtualUrl,
-        security,
-        policy.maxBytes,
-        signal
+      onProgress?.(
+        validationMode === 'release-etag'
+          ? 'Revalidating the release ETag…'
+          : 'Revalidating every remote asset with ETag and SHA-256…'
       );
+      const changed =
+        validationMode === 'release-etag'
+          ? await revalidateBundleEtag(
+              cacheAdapter,
+              stagingDirectory,
+              cached.manifest,
+              virtualUrl,
+              security,
+              signal
+            )
+          : await revalidateAssets(
+              cacheAdapter,
+              stagingDirectory,
+              cached.manifest.remoteAssets,
+              cached.manifest.entryUrl,
+              cached.bundle.baseUrl,
+              cached.manifest.documentFragmentInherited,
+              virtualUrl,
+              security,
+              policy.maxBytes,
+              signal
+            );
       if (!changed) {
-        onProgress?.('The remote bundle is unchanged. Using the verified local generation.');
+        onProgress?.('The remote bundle is unchanged. Using the current local generation.');
         return cached.bundle;
       }
-      onProgress?.('A remote asset changed. Building a new cache generation.');
+      onProgress?.(
+        validationMode === 'release-etag'
+          ? 'The release ETag changed. Building a new cache generation.'
+          : 'A remote asset changed. Building a new cache generation.'
+      );
     } catch (error) {
       if (signal?.aborted) throw createAbortError();
-      if (error instanceof ContentSecurityPolicyError) throw error;
-      onProgress?.('Revalidation failed. Using the last verified local generation.');
+      if (error instanceof ContentSecurityPolicyError || error instanceof RequiredReleaseEtagError)
+        throw error;
+      onProgress?.('Revalidation failed. Using the last complete local generation.');
       return cached.bundle;
     }
   }
@@ -2292,6 +2493,7 @@ async function resolveWebBundleUnlocked({
       security,
       policy.maxBytes,
       policy.maxInlineBytes,
+      validationMode,
       onProgress,
       signal
     );
@@ -2331,9 +2533,10 @@ async function resolveWebBundleUnlocked({
         generationValidationCache
       );
     }
-    if (error instanceof ContentSecurityPolicyError) throw error;
+    if (error instanceof ContentSecurityPolicyError || error instanceof RequiredReleaseEtagError)
+      throw error;
     if (cached) {
-      onProgress?.('Refresh failed. Using the last verified local generation.');
+      onProgress?.('Refresh failed. Using the last complete local generation.');
       return cached.bundle;
     }
     throw error;

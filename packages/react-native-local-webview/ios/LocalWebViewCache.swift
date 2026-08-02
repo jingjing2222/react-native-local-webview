@@ -16,7 +16,7 @@ private enum LocalWebViewCacheError: Error, LocalizedError {
     case .invalidRange:
       "The requested file range is invalid."
     case .invalidRequest:
-      "The native cache download request is invalid."
+      "The cache download request is invalid."
     case .nonHTTPResponse:
       "The cache downloader received a non-HTTP response."
     case .responseTooLarge(let url, let maximum, let observed):
@@ -389,7 +389,7 @@ private final class LocalWebViewDownloadClient: NSObject, URLSessionDataDelegate
   }
 }
 
-final class HybridLocalWebViewCache: HybridLocalWebViewCacheSpec {
+final class LocalWebViewCache: HybridLocalWebViewCacheSpec {
   private let downloadClient = LocalWebViewDownloadClient()
 
   var documentsDirectory: String {

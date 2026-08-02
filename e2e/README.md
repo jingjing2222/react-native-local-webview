@@ -7,11 +7,11 @@ that commonly break when an HTTPS application is mirrored into local storage.
 Every production benchmark is an A/B run:
 
 - the baseline uses `LocalWebView` with durable mirroring disabled and relies
-  only on the native WebView's normal HTTP cache;
+  only on the WebView's normal HTTP cache;
 - the candidate opens the remote page immediately on a cache miss, starts
   saving the same URL graph after document load, and starts later mounts from
-  the atomically published durable graph while full hash and ETag validation
-  continues behind the visible page.
+  the atomically published durable graph while one required release-ETag check
+  runs behind the visible page.
 
 Both sides use a run-specific query key, the same fixture graph, the same release
 app, and the same emulator or simulator profile. The generated comparison reports
@@ -32,7 +32,7 @@ Pass `smoke` directly to `scripts/e2e/run-comparison-benchmark.sh` for the
 50 MiB/100-resource subset. Comparison Markdown and the two raw runtime reports
 are written to `e2e/artifacts`.
 
-The shorter compatibility suites run on every supported native runtime:
+The shorter compatibility suites run on every supported platform runtime:
 
 ```sh
 yarn e2e:props:android:latest
@@ -58,12 +58,13 @@ The fixture server listens on loopback. CI exposes it only inside the runner's
 Tailscale network with `tailscale serve`, preserving a valid HTTPS origin without
 publishing the fixture to the internet.
 
-The candidate uses the built-in Nitro downloader, direct-to-file storage,
-native range reads, and native SHA-2 hashing. No external filesystem module is
-part of the benchmark data path.
+The candidate uses the built-in Nitro downloader, direct-to-file storage, and
+native range reads. Install-time digests are streamed during writes; warm runs
+do not reread payload files for hashing. No external filesystem module is part
+of the benchmark data path.
 
-The benchmark is intentionally manual because a full A/B run downloads, hashes,
-revalidates, and streams several gigabytes. Raw results, memory samples, and
+The benchmark is intentionally manual because a full A/B run downloads and
+streams several gigabytes. Raw results, memory samples, and
 direct-vs-local comparison tables are uploaded as workflow artifacts and appended
 to the GitHub Actions summary.
 
@@ -97,12 +98,12 @@ device or statistically stable product-performance claim.
 | 500 MiB     |            5.68 s |           7.30 s |      5.54 s |     3.89 s |        3.77 s |
 
 The direct WebView timed out after 30 seconds for every offline phase. The local
-runtime transferred zero network bytes for all ETag warm and offline phases.
+runtime transferred zero response-body bytes for all ETag warm and offline phases.
 Its first install used about twice the network bytes because the visible WebView
 and the background durable mirror each downloaded the graph.
 
 The run's peak app-host/WebKit/combined RSS was 585/1,047/1,623 MiB for the local
-runtime versus 260/1,046/1,271 MiB for direct WebView. The local 1,000-resource
-page was ready in 651 ms while its full background 304 validation completed in
-4.142 s. Use repeated physical-device runs before setting production latency or
-memory budgets.
+runtime versus 260/1,046/1,271 MiB for direct WebView. Those measurements predate
+single-request release validation; rerun `/e2e` before using background validation
+latency as a production budget. Use repeated physical-device runs before setting
+production latency or memory budgets.

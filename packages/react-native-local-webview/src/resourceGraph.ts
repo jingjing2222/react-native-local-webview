@@ -65,7 +65,7 @@ export type LoadedResource = {
   url: string;
 };
 
-export type ResourceDelivery = 'bridge' | 'inline';
+export type ResourceDelivery = 'file' | 'inline';
 
 export type ResourceLoadOptions = {
   delivery?: ResourceDelivery;
@@ -2014,7 +2014,7 @@ export async function localizeWebDocument({
       if (replacement.kind !== 'asset' && replacement.kind !== 'fetch-asset') continue;
       const delivery =
         replacement.kind === 'fetch-asset' || isStreamedRuntimeAsset(replacement.url)
-          ? 'bridge'
+          ? 'file'
           : 'inline';
       if (delivery === 'inline') inlineJavaScriptAssetUrls.add(replacement.url);
       const dependency = await load(replacement.url, {
@@ -2029,8 +2029,8 @@ export async function localizeWebDocument({
               ...dependency,
               ...(existing.content === undefined ? {} : { content: existing.content }),
               delivery:
-                existing.delivery === 'bridge' || dependency.delivery === 'bridge'
-                  ? 'bridge'
+                existing.delivery === 'file' || dependency.delivery === 'file'
+                  ? 'file'
                   : (dependency.delivery ?? existing.delivery),
               ...(existing.localPath === undefined ? {} : { localPath: existing.localPath }),
             }
@@ -2221,7 +2221,7 @@ export async function localizeWebDocument({
     ...new Set(
       [...loaded.entries()]
         .flatMap(([requestUrl, asset]) => {
-          if (asset.delivery !== 'bridge') return [];
+          if (asset.delivery !== 'file') return [];
           return [requestUrl, asset.url];
         })
         .map((value) => {
@@ -2869,7 +2869,7 @@ export async function localizeWebDocument({
       const relations = (attribute(element, 'rel') ?? '').toLowerCase().split(/\s+/);
       const supportsIntegrity = relations.includes('preload');
       const asset = await load(url, {
-        delivery: isStreamedRuntimeAsset(url) ? 'bridge' : 'inline',
+        delivery: isStreamedRuntimeAsset(url) ? 'file' : 'inline',
         integrity: supportsIntegrity ? attribute(element, 'integrity') : undefined,
       });
       loaded.set(url, asset);
@@ -2877,7 +2877,7 @@ export async function localizeWebDocument({
       const destination = (attribute(element, 'as') ?? '').toLowerCase();
       if (destination === 'script') assertJavaScriptMediaType(asset, url);
       else if (destination === 'style') assertStylesheetMediaType(asset, url);
-      if (asset.delivery === 'bridge') removeElement(element);
+      if (asset.delivery === 'file') removeElement(element);
       else {
         setAttribute(element, 'href', assetToDataUrl(asset, url, reserveMaterializedBytes));
         removeAttribute(element, 'integrity');

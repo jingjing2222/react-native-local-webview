@@ -42,7 +42,7 @@ export type LocalWebViewDownloadResult = {
   /**
    * Exact response-body bytes written to `path`.
    *
-   * Native implementations provide this so the resource graph does not need
+   * Implementations provide this so the resource graph does not need
    * a second filesystem round trip after every completed download.
    */
   bytesWritten?: number;
@@ -55,7 +55,7 @@ export type LocalWebViewDownloadResult = {
   status: number;
   /**
    * Whether this response created `path`. Non-success responses stay entirely
-   * in the native networking layer.
+   * in the networking layer.
    */
   wroteFile?: boolean;
 };
@@ -94,7 +94,7 @@ export interface LocalWebViewCacheAdapter {
   exists(path: string): Promise<boolean>;
   /**
    * Return every requested raw hexadecimal digest. Implementations should
-   * prefer native or single-pass hashing for large WebGL artifacts. Uppercase
+   * prefer platform or single-pass hashing for large WebGL artifacts. Uppercase
    * and lowercase digits are both accepted and normalized by the core.
    */
   hashFile(

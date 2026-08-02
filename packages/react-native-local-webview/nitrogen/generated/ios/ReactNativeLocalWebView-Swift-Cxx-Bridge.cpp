@@ -9,7 +9,7 @@
 
 // Include C++ implementation defined types
 #include "HybridLocalWebViewCacheSpecSwift.hpp"
-#include "HybridNativeLocalWebViewSpecSwift.hpp"
+#include "HybridLocalWebViewSpecSwift.hpp"
 #include "ReactNativeLocalWebView-Swift-Cxx-Umbrella.hpp"
 #include <NitroModules/NitroDefines.hpp>
 
@@ -48,19 +48,19 @@ namespace margelo::nitro::localwebview::bridge::swift {
     };
   }
 
-  // pragma MARK: std::shared_ptr<HybridNativeLocalWebViewSpec>
-  std::shared_ptr<HybridNativeLocalWebViewSpec> create_std__shared_ptr_HybridNativeLocalWebViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept {
-    ReactNativeLocalWebView::HybridNativeLocalWebViewSpec_cxx swiftPart = ReactNativeLocalWebView::HybridNativeLocalWebViewSpec_cxx::fromUnsafe(swiftUnsafePointer);
-    return std::make_shared<margelo::nitro::localwebview::HybridNativeLocalWebViewSpecSwift>(swiftPart);
+  // pragma MARK: std::shared_ptr<HybridLocalWebViewSpec>
+  std::shared_ptr<HybridLocalWebViewSpec> create_std__shared_ptr_HybridLocalWebViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept {
+    ReactNativeLocalWebView::HybridLocalWebViewSpec_cxx swiftPart = ReactNativeLocalWebView::HybridLocalWebViewSpec_cxx::fromUnsafe(swiftUnsafePointer);
+    return std::make_shared<margelo::nitro::localwebview::HybridLocalWebViewSpecSwift>(swiftPart);
   }
-  void* NON_NULL get_std__shared_ptr_HybridNativeLocalWebViewSpec_(std__shared_ptr_HybridNativeLocalWebViewSpec_ cppType) {
-    std::shared_ptr<margelo::nitro::localwebview::HybridNativeLocalWebViewSpecSwift> swiftWrapper = std::dynamic_pointer_cast<margelo::nitro::localwebview::HybridNativeLocalWebViewSpecSwift>(cppType);
+  void* NON_NULL get_std__shared_ptr_HybridLocalWebViewSpec_(std__shared_ptr_HybridLocalWebViewSpec_ cppType) {
+    std::shared_ptr<margelo::nitro::localwebview::HybridLocalWebViewSpecSwift> swiftWrapper = std::dynamic_pointer_cast<margelo::nitro::localwebview::HybridLocalWebViewSpecSwift>(cppType);
     #ifdef NITRO_DEBUG
     if (swiftWrapper == nullptr) [[unlikely]] {
-      throw std::runtime_error("Class \"HybridNativeLocalWebViewSpec\" is not implemented in Swift!");
+      throw std::runtime_error("Class \"HybridLocalWebViewSpec\" is not implemented in Swift!");
     }
     #endif
-    ReactNativeLocalWebView::HybridNativeLocalWebViewSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
+    ReactNativeLocalWebView::HybridLocalWebViewSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
     return swiftPart.toUnsafe();
   }
 

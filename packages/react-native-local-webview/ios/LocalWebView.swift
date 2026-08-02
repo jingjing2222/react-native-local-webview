@@ -3,7 +3,7 @@ import UIKit
 import WebKit
 
 private final class LocalWebViewContainer: UIView {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   override func layoutSubviews() {
     super.layoutSubviews()
@@ -47,7 +47,7 @@ private final class LocalRuntimeWebView: WKWebView {
 }
 
 private final class LocalWebViewMessageProxy: NSObject, WKScriptMessageHandler {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func userContentController(
     _ userContentController: WKUserContentController,
@@ -58,7 +58,7 @@ private final class LocalWebViewMessageProxy: NSObject, WKScriptMessageHandler {
 }
 
 private final class LocalWebViewRequestBodyProxy: NSObject, WKScriptMessageHandlerWithReply {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func userContentController(
     _ userContentController: WKUserContentController,
@@ -71,7 +71,7 @@ private final class LocalWebViewRequestBodyProxy: NSObject, WKScriptMessageHandl
 }
 
 private final class LocalWebViewCookieStoreProxy: NSObject, WKHTTPCookieStoreObserver {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
     owner?.cookiesDidChange(in: cookieStore)
@@ -82,7 +82,7 @@ private final class LocalWebViewMenuProxy: NSObject, UIEditMenuInteractionDelega
   UIGestureRecognizerDelegate
 {
   weak var interaction: UIEditMenuInteraction?
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   @objc func presentMenu(_ recognizer: UILongPressGestureRecognizer) {
     guard recognizer.state == .ended, owner?.hasCustomMenuConfiguration == true else {
@@ -120,7 +120,7 @@ private final class LocalWebViewMenuProxy: NSObject, UIEditMenuInteractionDelega
 }
 
 private final class LocalWebViewNavigationProxy: NSObject, WKNavigationDelegate {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func webView(
     _ webView: WKWebView,
@@ -182,7 +182,7 @@ private final class LocalWebViewNavigationProxy: NSObject, WKNavigationDelegate 
 }
 
 private final class LocalWebViewUIProxy: NSObject, WKUIDelegate {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func webView(
     _ webView: WKWebView,
@@ -211,14 +211,14 @@ private final class LocalWebViewUIProxy: NSObject, WKUIDelegate {
 }
 
 private final class LocalWebViewScrollProxy: NSObject, UIScrollViewDelegate {
-  weak var owner: HybridLocalWebView?
+  weak var owner: LocalWebView?
 
   func scrollViewDidScroll(_ scrollView: UIScrollView) {
     owner?.didScroll(scrollView)
   }
 }
 
-final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
+final class LocalWebView: HybridLocalWebViewSpec {
   fileprivate struct CustomMenuItem {
     let key: String
     let label: String
@@ -257,6 +257,7 @@ final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
 
   var assetsJson = "[]"
   var baseUrl = ""
+  var cacheRequestJson = ""
   var configurationJson = "{}"
   var documentId = ""
   var html = ""
@@ -463,7 +464,7 @@ final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
   }
 
   private func createWebView() {
-    let nativeConfiguration = WKWebViewConfiguration()
+    let webViewConfiguration = WKWebViewConfiguration()
     let preferences = WKPreferences()
     preferences.javaScriptCanOpenWindowsAutomatically =
       boolean("javaScriptCanOpenWindowsAutomatically", false)
@@ -472,42 +473,42 @@ final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
     if boolean("allowFileAccessFromFileURLs", false) {
       preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
     }
-    nativeConfiguration.preferences = preferences
-    nativeConfiguration.defaultWebpagePreferences.allowsContentJavaScript =
+    webViewConfiguration.preferences = preferences
+    webViewConfiguration.defaultWebpagePreferences.allowsContentJavaScript =
       boolean("javaScriptEnabled", true)
-    nativeConfiguration.allowsInlineMediaPlayback =
+    webViewConfiguration.allowsInlineMediaPlayback =
       boolean("allowsInlineMediaPlayback", false)
-    nativeConfiguration.allowsPictureInPictureMediaPlayback =
+    webViewConfiguration.allowsPictureInPictureMediaPlayback =
       boolean("allowsPictureInPictureMediaPlayback", true)
-    nativeConfiguration.allowsAirPlayForMediaPlayback =
+    webViewConfiguration.allowsAirPlayForMediaPlayback =
       boolean("allowsAirPlayForMediaPlayback", false)
-    nativeConfiguration.mediaTypesRequiringUserActionForPlayback =
+    webViewConfiguration.mediaTypesRequiringUserActionForPlayback =
       boolean("mediaPlaybackRequiresUserAction", true) ? .all : []
-    nativeConfiguration.dataDetectorTypes = dataDetectorTypes()
-    nativeConfiguration.websiteDataStore =
+    webViewConfiguration.dataDetectorTypes = dataDetectorTypes()
+    webViewConfiguration.websiteDataStore =
       boolean("incognito", false) || !boolean("cacheEnabled", true)
       ? .nonPersistent() : .default()
     if boolean("useSharedProcessPool", true) {
-      nativeConfiguration.processPool = Self.sharedProcessPool
+      webViewConfiguration.processPool = Self.sharedProcessPool
     }
     if let value = string("applicationNameForUserAgent") {
-      nativeConfiguration.applicationNameForUserAgent = [
-        nativeConfiguration.applicationNameForUserAgent,
+      webViewConfiguration.applicationNameForUserAgent = [
+        webViewConfiguration.applicationNameForUserAgent,
         value,
       ].compactMap { $0 }.joined(separator: " ")
     }
-    nativeConfiguration.defaultWebpagePreferences.preferredContentMode = contentMode()
+    webViewConfiguration.defaultWebpagePreferences.preferredContentMode = contentMode()
     if boolean("limitsNavigationsToAppBoundDomains", false) {
-      nativeConfiguration.limitsNavigationsToAppBoundDomains = true
+      webViewConfiguration.limitsNavigationsToAppBoundDomains = true
     }
     if boolean("allowUniversalAccessFromFileURLs", false) {
-      nativeConfiguration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+      webViewConfiguration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
     }
-    nativeConfiguration.userContentController = WKUserContentController()
+    webViewConfiguration.userContentController = WKUserContentController()
 
     let nextWebView = LocalRuntimeWebView(
       frame: container.bounds,
-      configuration: nativeConfiguration
+      configuration: webViewConfiguration
     )
     nextWebView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     nextWebView.isOpaque = false
@@ -534,6 +535,51 @@ final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
 
   private func loadDocument() throws {
     guard let webView else { return }
+    if !cacheRequestJson.isEmpty {
+      let request = try decodeObject(cacheRequestJson)
+      guard
+        let requestedUrl = request["virtualUrl"] as? String,
+        let remoteUrl = URL(string: requestedUrl)
+      else {
+        throw runtimeError("cacheRequestJson.virtualUrl must be a valid URL.")
+      }
+      if let cached = try LocalAssetURLProtocol.configureCachedBundle(
+        cacheRequestJson: cacheRequestJson,
+        basicAuthCredential: dictionary("basicAuthCredential"),
+        cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+        registryId: protocolRegistryId
+      ) {
+        guard let cachedUrl = URL(string: cached.baseUrl) else {
+          throw runtimeError("The cached document URL is invalid.")
+        }
+        if cachedUrl.scheme == "https",
+          !privateProtocolStatus.hasPrefix("Installed"),
+          !privateProtocolStatus.hasSuffix("already installed.")
+        {
+          throw runtimeError(privateProtocolStatus)
+        }
+        baseUrl = cached.baseUrl
+        loadedDocumentId = documentId
+        webView.load(URLRequest(url: cachedUrl))
+      } else {
+        baseUrl = requestedUrl
+        if dictionary("basicAuthCredential") == nil {
+          LocalAssetURLProtocol.unregister(registryId: protocolRegistryId)
+        } else {
+          _ = try LocalAssetURLProtocol.configure(
+            assetsJson: "[]",
+            baseUrl: requestedUrl,
+            basicAuthCredential: dictionary("basicAuthCredential"),
+            cookieStore: webView.configuration.websiteDataStore.httpCookieStore,
+            html: "",
+            registryId: protocolRegistryId
+          )
+        }
+        loadedDocumentId = documentId
+        webView.load(URLRequest(url: remoteUrl))
+      }
+      return
+    }
     if !sourceJson.isEmpty {
       let source = try decodeObject(sourceJson)
       guard let urlString = source["uri"] as? String, let url = URL(string: urlString) else {
@@ -941,17 +987,17 @@ final class HybridLocalWebView: HybridNativeLocalWebViewSpec {
   }
 
   fileprivate func didFailNavigation(_ error: any Error, provisional: Bool) {
-    let nativeError = error as NSError
-    if nativeError.domain == NSURLErrorDomain && nativeError.code == NSURLErrorCancelled {
+    let nsError = error as NSError
+    if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
       return
     }
     emit(
       "error",
       extra: [
-        "code": nativeError.code,
-        "description": nativeError.localizedDescription,
+        "code": nsError.code,
+        "description": nsError.localizedDescription,
         "didFailProvisionalNavigation": provisional,
-        "domain": nativeError.domain,
+        "domain": nsError.domain,
       ]
     )
   }

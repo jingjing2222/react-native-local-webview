@@ -1,9 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import type {
-  NativeLocalWebViewHandle,
-  NativeLocalWebViewProps,
-} from '../src/NativeLocalWebView.native';
+import type { LocalWebViewHandle, LocalWebViewProps } from '../src/LocalWebView.native';
 import type { WebViewProps } from '../src/localWebViewTypes';
 import {
   ANDROID_WEBVIEW_PROP_NAMES,
@@ -12,7 +9,7 @@ import {
   WEBVIEW_METHOD_NAMES,
   WINDOWS_WEBVIEW_PROP_NAMES,
   isOriginAllowed,
-  nativeConfigurationFromProps,
+  configurationFromProps,
   viewPropsFromWebViewProps,
 } from '../src/webViewCompatibility';
 
@@ -26,18 +23,18 @@ describe('react-native-webview 13.16.0 compatibility inventory', () => {
   });
 
   it('preserves the package history, sourcePath, and rollback API', () => {
-    expectTypeOf<NativeLocalWebViewProps>().toHaveProperty('sourcePath');
-    expectTypeOf<NativeLocalWebViewProps>().toHaveProperty('onHistoryChange');
-    expectTypeOf<NativeLocalWebViewProps>().toHaveProperty('onCacheRollback');
-    expectTypeOf<NativeLocalWebViewProps>().toHaveProperty('onBundleStored');
-    expectTypeOf<NativeLocalWebViewHandle>().toHaveProperty('getHistoryState');
-    expectTypeOf<NativeLocalWebViewHandle>().toHaveProperty('rollback');
+    expectTypeOf<LocalWebViewProps>().toHaveProperty('sourcePath');
+    expectTypeOf<LocalWebViewProps>().toHaveProperty('onHistoryChange');
+    expectTypeOf<LocalWebViewProps>().toHaveProperty('onCacheRollback');
+    expectTypeOf<LocalWebViewProps>().toHaveProperty('onBundleStored');
+    expectTypeOf<LocalWebViewHandle>().toHaveProperty('getHistoryState');
+    expectTypeOf<LocalWebViewHandle>().toHaveProperty('rollback');
   });
 
   it('forwards every defined native value, including false and zero', () => {
     const onMessage = () => undefined;
     expect(
-      nativeConfigurationFromProps({
+      configurationFromProps({
         javaScriptEnabled: false,
         onMessage,
         textZoom: 0,

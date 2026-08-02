@@ -6,26 +6,26 @@ import {
   rollbackWebBundle as rollbackWebBundleWithAdapter,
   type ResolveWebBundleOptions as InternalResolveWebBundleOptions,
 } from './mirrorWebBundle';
-import { getNativeCacheAdapter } from './nativeCacheAdapter';
+import { getCacheAdapter } from './nitroCacheAdapter';
 
 export type ResolveWebBundleOptions = Omit<InternalResolveWebBundleOptions, 'cacheAdapter'>;
 
-function nativeAdapter(): LocalWebViewCacheAdapter {
-  return getNativeCacheAdapter();
+function cacheAdapter(): LocalWebViewCacheAdapter {
+  return getCacheAdapter();
 }
 
 export function cacheDirectoryForOrigin(virtualUrl: string): string {
-  return cacheDirectoryForOriginWithAdapter(virtualUrl, nativeAdapter());
+  return cacheDirectoryForOriginWithAdapter(virtualUrl, cacheAdapter());
 }
 
 export function readMirroredWebBundle(source: string): Promise<string> {
-  return readMirroredWebBundleWithAdapter(source, nativeAdapter());
+  return readMirroredWebBundleWithAdapter(source, cacheAdapter());
 }
 
 export function resolveWebBundle(
   options: ResolveWebBundleOptions
 ): ReturnType<typeof resolveWebBundleWithAdapter> {
-  return resolveWebBundleWithAdapter({ ...options, cacheAdapter: nativeAdapter() });
+  return resolveWebBundleWithAdapter({ ...options, cacheAdapter: cacheAdapter() });
 }
 
 export function rollbackWebBundle(
@@ -35,7 +35,7 @@ export function rollbackWebBundle(
 ): ReturnType<typeof rollbackWebBundleWithAdapter> {
   return rollbackWebBundleWithAdapter(
     cacheDirectory,
-    nativeAdapter(),
+    cacheAdapter(),
     currentGenerationId,
     requestedUrl
   );
@@ -45,7 +45,7 @@ export async function clearLocalWebViewCache(
   virtualUrl: string,
   cacheDirectory?: string
 ): Promise<void> {
-  const adapter = nativeAdapter();
+  const adapter = cacheAdapter();
   const directory = cacheDirectory ?? cacheDirectoryForOriginWithAdapter(virtualUrl, adapter);
   if (await adapter.exists(directory)) await adapter.remove(directory);
 }

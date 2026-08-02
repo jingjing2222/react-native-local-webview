@@ -33,12 +33,12 @@ target_sources(
   # Autolinking Setup
   ../nitrogen/generated/android/reactnativelocalwebviewOnLoad.cpp
   # Shared Nitrogen C++ sources
-  ../nitrogen/generated/shared/c++/HybridNativeLocalWebViewSpec.cpp
-  ../nitrogen/generated/shared/c++/views/HybridNativeLocalWebViewComponent.cpp
+  ../nitrogen/generated/shared/c++/HybridLocalWebViewSpec.cpp
+  ../nitrogen/generated/shared/c++/views/HybridLocalWebViewComponent.cpp
   ../nitrogen/generated/shared/c++/HybridLocalWebViewCacheSpec.cpp
   # Android-specific Nitrogen C++ sources
-  ../nitrogen/generated/android/c++/JHybridNativeLocalWebViewSpec.cpp
-  ../nitrogen/generated/android/c++/views/JHybridNativeLocalWebViewStateUpdater.cpp
+  ../nitrogen/generated/android/c++/JHybridLocalWebViewSpec.cpp
+  ../nitrogen/generated/android/c++/views/JHybridLocalWebViewStateUpdater.cpp
   ../nitrogen/generated/android/c++/JHybridLocalWebViewCacheSpec.cpp
 )
 

@@ -16,7 +16,7 @@ export type LocalWebViewHistoryState = {
 
 export function historyStateFromMessage(
   data: string,
-  nativeState: {
+  navigationState: {
     canGoBack: boolean;
     canGoForward: boolean;
   }
@@ -29,8 +29,8 @@ export function historyStateFromMessage(
       return undefined;
     }
     return {
-      canGoBack: nativeState.canGoBack,
-      canGoForward: nativeState.canGoForward,
+      canGoBack: navigationState.canGoBack,
+      canGoForward: navigationState.canGoForward,
       length:
         typeof message.length === 'number' && Number.isFinite(message.length) ? message.length : 1,
       navigationType:

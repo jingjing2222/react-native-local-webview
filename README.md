@@ -3,30 +3,39 @@
 [![CI](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml/badge.svg)](https://github.com/jingjing2222/react-native-local-webview/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/react-native-local-webview.svg)](https://www.npmjs.com/package/react-native-local-webview)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Node 24.15.0](https://img.shields.io/badge/node-24.15.0-339933.svg)](./mise.toml)
 
 > Run CSR and Unity WebGL bundles from durable local storage without giving up
 > their HTTPS origin.
 
-`LocalWebView` is a Nitro-powered iOS and Android WebView runtime for apps that
-need large web bundles to keep working after the operating system evicts its
-normal HTTP cache.
+`LocalWebView` is for React Native apps that need a web experience to remain
+available after the operating system evicts the normal WebView cache.
 
-It opens the real remote page immediately on a cold install, saves a complete
-verified generation in the background, and starts from local files on later
-launches. The page still sees its original HTTPS URL, origin, cookies, CORS,
-History API, workers, WASM, and Range requests.
+The first visit opens the remote page immediately and stores a complete bundle
+in the background. Later visits can start from app-owned local files while the
+page still sees its original HTTPS URL, origin, cookies, CORS rules, History
+API, workers, WASM, and Range requests.
 
-```text
-first mount ──▶ remote HTTPS page ──▶ visible immediately
-        └────▶ native download + hash ──▶ durable generation
+## Is it a good fit?
 
-warm/offline mount ──▶ published local files ──▶ original HTTPS browsing context
-        └────▶ native rehash + ETag checks ──▶ repair or next generation
-```
+Use it when:
 
-Large response bodies, file copies, ranges, and SHA-2 hashing stay native. They
-do not cross the React Native bridge.
+- a CSR application or Unity WebGL game must start offline after one successful install;
+- a partially cached release is not acceptable;
+- loading from `file://` would break origin-sensitive browser behavior;
+- large `.data` and `.wasm` files should remain streamable files instead of crossing React state.
+
+Prefer a normal WebView when durable offline availability is unnecessary. An
+already-hot HTTP cache can be faster and use less app-owned storage.
+
+| Behavior        | Normal WebView cache         | `LocalWebView`                              |
+| --------------- | ---------------------------- | ------------------------------------------- |
+| Cache ownership | Operating system             | Your application                            |
+| Offline release | Independent cached responses | One complete published generation           |
+| First visit     | Remote page                  | Remote page, background installation        |
+| Later visit     | Depends on HTTP cache policy | Published local generation                  |
+| Page origin     | HTTPS                        | The same HTTPS origin                       |
+| Update check    | Browser-defined              | One release ETag request                    |
+| Recovery        | Browser cache behavior       | Previous complete generation or remote page |
 
 ## Install
 
@@ -38,10 +47,10 @@ cd ios && pod install
 Requirements:
 
 - React Native New Architecture
-- iOS 16.4+
-- Android API 24+
+- iOS 16.4 or newer
+- Android API 24 or newer
 
-## Use
+## Quick start
 
 ```tsx
 import { LocalWebView } from 'react-native-local-webview';
@@ -49,14 +58,17 @@ import { LocalWebView } from 'react-native-local-webview';
 export function Game() {
   return (
     <LocalWebView
-      source={{ uri: 'https://book.jingjing2222.com/' }}
+      source={{ uri: 'https://game.example.com/' }}
+      validationMode="release-etag"
       cachePolicy={{
         maxBytes: 800 * 1024 * 1024,
         maxGenerations: 2,
-        maxInlineBytes: 4 * 1024 * 1024,
       }}
       onBundleStored={(bundle) => {
-        console.log('durable generation', bundle.generationId);
+        console.log('Available offline:', bundle.generationId);
+      }}
+      onBundleError={(error) => {
+        console.error('Bundle installation failed:', error);
       }}
       style={{ flex: 1 }}
     />
@@ -64,56 +76,71 @@ export function Game() {
 }
 ```
 
-`virtualUrl="https://…"` is also available for components dedicated to one
-entry. Do not pass `virtualUrl` and `source` together.
+`virtualUrl="https://…"` is also available when a component is dedicated to
+one entry URL. Do not pass `source` and `virtualUrl` together.
 
-## Why this is different from WebView cache
+## Configure the release ETag
 
-|                 | Normal WebView cache         | LocalWebView                           |
-| --------------- | ---------------------------- | -------------------------------------- |
-| Eviction        | Controlled by the OS         | App-owned persistent files             |
-| Offline release | Independent cached responses | Atomic verified generation             |
-| First install   | Remote page                  | Same remote page, mirror in background |
-| Warm start      | Cache policy dependent       | Published local generation immediately |
-| Page origin     | HTTPS                        | Same HTTPS origin                      |
-| Large-file path | WebView network stack        | Native file stream                     |
-| Revalidation    | Browser-defined              | Per-resource ETag and SHA-256          |
-| Rollback        | None                         | Previous complete generation           |
+For predictable warm starts, set `validationMode="release-etag"` and make the
+entry response's ETag identify the complete deployed release:
 
-This runtime is for durable availability and predictable release ownership.
-It is not expected to beat an already-hot WebView HTTP cache on every page.
+```http
+ETag: "game-release-2026-08-03.1"
+```
 
-## Unity WebGL and CSR support
+Change it whenever any captured HTML, JavaScript, CSS, worker, WASM, or Unity
+data file changes. Later starts send one `If-None-Match` request:
 
-The graph collector parses production HTML, CSS, and JavaScript and handles:
+- `304 Not Modified` keeps the installed generation;
+- a successful `200` installs a new generation for the next mount;
+- a missing ETag rejects installation instead of silently using an unsafe comparison.
 
-- module scripts and static or dynamic imports
-- stylesheets, CSS imports, `url(...)`, `src`, and `srcset`
-- preload and module-preload resources
-- Web Workers and worker module graphs
-- WebAssembly
-- Unity loader, framework, `.data`, and `.wasm` files
+If your infrastructure cannot provide a release-wide validator, the default
+`content-hash` mode revalidates resources individually. It is more portable but
+does more disk and network work on warm starts.
 
-Large artifacts remain as files. Native interception serves complete and
-single-range responses directly to WebKit or Android WebView. Runtime API
-requests that are not part of the mirrored graph continue through the real
-HTTPS network.
+## Supported web bundles
 
-## Cache lifecycle
+The collector supports production CSR and Unity WebGL output, including:
 
-On a cold install, the current remote document becomes visible before the
-mirror completes. `onBundleStored` marks the point at which the new generation
-is durable.
+- module scripts, static imports, and dynamic imports;
+- stylesheets, CSS imports, `url(...)`, `src`, and `srcset`;
+- preload and module-preload resources;
+- Web Workers and worker module graphs;
+- WebAssembly and Unity loader, framework, `.data`, and `.wasm` files.
 
-On a warm start, the previously committed local generation is shown as soon as
-its state, manifest, and entry path are present. Full local SHA-256 verification
-and remote revalidation then run behind the visible page. Every resource with an
-ETag is conditionally requested. A resource without an ETag is downloaded and
-compared by SHA-256. Corruption falls back to a verified rollback or the remote
-page; a changed response creates a new generation without damaging the active
-one.
+Large resources stay as files and support complete and single-range responses.
+Runtime API calls that are not part of the captured graph continue through the
+real HTTPS network.
 
-Useful controls:
+## Origin and navigation
+
+Local bytes are presented at the original HTTPS document URL. The page retains:
+
+- its original `location.origin` and secure context;
+- normal relative URL resolution;
+- same-origin cookies, storage, fetch, and browser security checks;
+- `pushState`, `replaceState`, `back`, `forward`, and `go`.
+
+SPA history can be observed with `onHistoryChange` and controlled through a
+`LocalWebViewHandle`:
+
+```tsx
+import { useRef } from 'react';
+import { LocalWebView, type LocalWebViewHandle } from 'react-native-local-webview';
+
+const ref = useRef<LocalWebViewHandle>(null);
+
+<LocalWebView
+  ref={ref}
+  virtualUrl="https://app.example.com/"
+  onHistoryChange={(history) => console.log(history.url)}
+/>;
+
+ref.current?.goBack();
+```
+
+## Cache and recovery controls
 
 ```ts
 import {
@@ -126,116 +153,68 @@ import {
 const url = 'https://game.example.com/';
 const directory = cacheDirectoryForOrigin(url);
 
-await resolveWebBundle({ virtualUrl: url, forceRefresh: true });
+await resolveWebBundle({
+  virtualUrl: url,
+  forceRefresh: true,
+  validationMode: 'release-etag',
+});
 await rollbackWebBundle(directory);
 await clearLocalWebViewCache(url);
 ```
 
-Storage and networking are always provided by the built-in Nitro runtime.
+The default cache retains at most 512 MiB and two complete generations per
+origin. Configure `maxBytes`, `maxGenerations`, and `maxInlineBytes` through
+`cachePolicy` when your bundle needs different limits.
 
-### Cache data path
+## React Native WebView compatibility
 
-| Path                  | Redundant work removed                                                 |
-| --------------------- | ---------------------------------------------------------------------- |
-| Successful download   | One complete post-download file read for SHA-2, plus one `stat`        |
-| HTTP 304 revalidation | Temporary-file creation, existence check, and removal                  |
-| iOS resource batch    | Per-resource `URLSession`; one reusable session keeps connection pools |
-| Large native streams  | 8 KiB Android copy loops and per-callback iOS file writes              |
+The public props, events, and imperative methods track
+`react-native-webview@13.16.0`. `LocalWebView` implements them directly with
+`WKWebView` and Android WebView; installing `react-native-webview` is not
+required.
 
-The native downloader computes the required SHA-2 digests while response bytes
-are being written. Android and iOS batch file I/O in 256 KiB chunks. This
-changes where the same integrity work happens; it does not skip it.
-
-Each generation is fully hashed before it is published. A later warm mount does
-not block WebView navigation on hashing hundreds of MiB again: it checks the
-atomically published metadata and entry path, starts the original HTTPS URL from
-local files, and performs the full payload rehash in the background.
-
-## Direct baseline
-
-The same native component can load a URL without durable mirroring:
+Set `durableCacheEnabled={false}` to use the same component as a direct WebView:
 
 ```tsx
 <LocalWebView durableCacheEnabled={false} source={{ uri: 'https://game.example.com/' }} />
 ```
 
-The E2E benchmark uses this as its direct WebView baseline. Both sides therefore
-share the same WebView implementation and differ only in response delivery.
-
 POST requests, request bodies, custom request headers, non-HTTPS URLs, and
-inline HTML use direct mode automatically.
-
-## React Native WebView compatibility
-
-The public props, events, and ten imperative methods track
-`react-native-webview@13.16.0`. The implementation uses `WKWebView` and
-`android.webkit.WebView` directly.
-
-`nativeConfig.props` can pass extra values to the built-in Nitro native view.
-Replacing the component through `nativeConfig.component` is intentionally not
-supported because it would bypass this runtime.
+inline HTML also use direct mode automatically.
 
 ## Security defaults
 
 - Only absolute HTTPS entries are mirrored.
-- Cross-origin assets require an explicit `trustedAssetOrigins` entry.
-- Redirects are validated one hop at a time.
-- Every cached file is checked against its manifest SHA-256 before activation.
-- Subresource Integrity is enforced when present.
-- Content Security Policy is preserved by default.
+- Cross-origin assets require `trustedAssetOrigins`.
+- Redirect targets are validated one hop at a time.
+- Subresource Integrity metadata is enforced when present.
+- Content Security Policy is preserved unless you explicitly set
+  `allowContentSecurityPolicyBypass` for content you control.
 
-`allowContentSecurityPolicyBypass` is available for content you own when
-removing CSP is an explicit product decision.
+## Current limitations
 
-## Benchmark matrix
+- iOS and Android are supported.
+- Only statically discoverable resources are stored. URLs assembled solely from
+  runtime data remain network requests.
+- A Service Worker-dependent application needs explicit compatibility testing;
+  the request interceptor is not a Service Worker replacement.
+- First installation intentionally uses more network traffic because the
+  visible remote page and background bundle installation run together.
 
-Comment `/e2e` on a same-repository pull request to run the macOS ARM64 runner:
+## Performance evidence
 
-- 50 MiB, 200 MiB, and 500 MiB Unity graphs
-- cold install, warm start, and fully offline start
-- low-end and current Android emulators
-- iOS simulator host and WebKit process memory
-- 100, 500, and 1,000-resource all-304 revalidation
-- large files without ETags
-- CSP, cookies, Range fetches, workers, WASM, and real Unity startup
+The repository benchmark compares direct HTTPS loading with local delivery for
+50 MiB, 200 MiB, and 500 MiB Unity graphs, offline starts, 100–1,000-resource
+release checks, Range fetches, workers, WASM, cookies, CSP, and memory use.
 
-Each platform produces a direct-vs-local report with page-ready time,
-background storage time, network bytes, 304 counts, offline availability, and
-peak memory.
+In the latest 50 MiB iOS simulator smoke run, the local path reached page-ready
+in 1.08 s on a warm start, completed its single `304` release check in 0.52 s,
+and reached page-ready in 0.78 s while fully offline. These are simulator smoke
+measurements, not physical-device production guarantees.
 
-### Measured iOS simulator run
-
-One sequential Release run of this revision on an iPhone 17 Pro iOS 26.5
-simulator hosted by an Apple M4 Mac mini produced:
-
-| Unity graph | Direct first page | Local first page | Direct warm | Local warm | Local offline |
-| ----------- | ----------------: | ---------------: | ----------: | ---------: | ------------: |
-| 50 MiB      |            1.81 s |           1.51 s |      0.60 s |     1.95 s |        2.08 s |
-| 200 MiB     |            3.14 s |           2.89 s |      2.55 s |     2.71 s |        2.70 s |
-| 500 MiB     |            5.68 s |           7.30 s |      5.54 s |     3.89 s |        3.77 s |
-
-The direct runtime timed out after 30 seconds in every offline phase. The local
-runtime used zero network bytes for ETag warm and offline phases. First install
-used roughly twice the network bytes because the visible remote page and
-background durable mirror intentionally run together.
-
-The local runtime's peak app-host/WebKit/combined RSS was 585/1,047/1,623 MiB
-versus 260/1,046/1,271 MiB for direct mode. These are single simulator runs, not
-physical-device or statistically stable production budgets.
-
-See [the package guide](./packages/react-native-local-webview/README.md) for the
-complete API and [the E2E guide](./e2e/README.md) for benchmark mechanics.
-
-## Development
-
-```sh
-mise install
-yarn install --immutable
-yarn check
-```
-
-The monorepo uses Node 24.15.0, mise, Nx, tsdown, oxlint, oxfmt, Vitest, and
-Changesets.
+See the [package guide](./packages/react-native-local-webview/README.md) for the
+complete usage reference, [E2E guide](./e2e/README.md) for benchmark mechanics,
+and [contribution guide](./CONTRIBUTING.md) for the internal execution flow.
 
 ## License
 

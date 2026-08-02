@@ -12,7 +12,7 @@ const MIB = 1024 * 1024;
 const MOUNT_TIMEOUT_MS = 45 * 60 * 1000;
 const REMOTE_OFFLINE_OBSERVATION_MS = 30 * 1000;
 
-type BenchmarkRuntime = 'native' | 'remote';
+type BenchmarkRuntime = 'local' | 'remote';
 
 type BenchmarkConfiguration = {
   origin: string;
@@ -99,7 +99,7 @@ function parseConfiguration(url: string): BenchmarkConfiguration | undefined {
     const runId = parsed.searchParams.get('runId');
     if (!origin || !runId || new URL(origin).protocol !== 'https:') return undefined;
     const requestedRuntime = parsed.searchParams.get('runtime');
-    const runtime: BenchmarkRuntime = requestedRuntime === 'remote' ? 'remote' : 'native';
+    const runtime: BenchmarkRuntime = requestedRuntime === 'remote' ? 'remote' : 'local';
     return {
       origin: new URL(origin).origin,
       platform: parsed.searchParams.get('platform') || 'unknown',
@@ -339,12 +339,14 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     await removeCache(noEtagCache);
     await execute({
       cacheDirectory: noEtagCache,
+      expectedError: runtime !== 'remote',
       label: noEtagLabel,
       phase: 'initial',
       virtualUrl: noEtagUrl,
     });
     await execute({
       cacheDirectory: noEtagCache,
+      expectedError: runtime !== 'remote',
       label: noEtagLabel,
       phase: 'warm-no-etag',
       virtualUrl: noEtagUrl,
@@ -372,6 +374,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
           maxInlineBytes: 4 * MIB,
         },
         trustedAssetOrigins: [],
+        validationMode: 'release-etag',
         virtualUrl: edgeUrl,
       });
       await execute({
@@ -525,6 +528,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
             onBundleReady={handleBundleReady}
             onBundleStored={handleBundleStored}
             onMessage={handleMessage}
+            validationMode="release-etag"
             virtualUrl={active.virtualUrl}
             style={styles.webView}
           />

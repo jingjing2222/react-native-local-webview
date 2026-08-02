@@ -1,8 +1,8 @@
 import type { HybridObject } from 'react-native-nitro-modules';
 
 /**
- * Native storage and networking primitives used by the bundle graph
- * orchestrator. File contents, response bodies, and hashes stay native unless
+ * Storage and networking primitives used by the bundle graph orchestrator.
+ * File contents, response bodies, and hashes stay on the platform side unless
  * the JavaScript parser explicitly requests a bounded text resource.
  */
 export interface LocalWebViewCache extends HybridObject<{ ios: 'swift'; android: 'kotlin' }> {

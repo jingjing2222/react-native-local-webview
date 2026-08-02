@@ -6,9 +6,9 @@ vi.mock('react-native-nitro-modules', () => ({
 
 import type { LocalWebViewCache } from '../src/LocalWebViewCache.nitro';
 import { LocalWebViewDownloadLimitError } from '../src/localWebViewCacheAdapter';
-import { createNativeCacheAdapter } from '../src/nativeCacheAdapter';
+import { createNitroCacheAdapter } from '../src/nitroCacheAdapter';
 
-function nativeCache(overrides: Partial<LocalWebViewCache> = {}): LocalWebViewCache {
+function cacheObject(overrides: Partial<LocalWebViewCache> = {}): LocalWebViewCache {
   return {
     cancelDownload: () => undefined,
     copyFile: async () => undefined,
@@ -38,8 +38,8 @@ function nativeCache(overrides: Partial<LocalWebViewCache> = {}): LocalWebViewCa
   } as LocalWebViewCache;
 }
 
-describe('native cache adapter', () => {
-  it('passes only request metadata to native and parses response metadata', async () => {
+describe('Nitro cache adapter', () => {
+  it('passes only request metadata to the cache object and parses response metadata', async () => {
     const nativeDownload = vi.fn<LocalWebViewCache['download']>(async () =>
       JSON.stringify({
         bytesWritten: 12,
@@ -50,8 +50,8 @@ describe('native cache adapter', () => {
         wroteFile: true,
       })
     );
-    const cache = nativeCache({ download: nativeDownload });
-    const adapter = createNativeCacheAdapter(cache);
+    const cache = cacheObject({ download: nativeDownload });
+    const adapter = createNitroCacheAdapter(cache);
 
     await expect(
       adapter.download({
@@ -88,10 +88,10 @@ describe('native cache adapter', () => {
     });
   });
 
-  it('cancels the native transfer and reports AbortError', async () => {
+  it('cancels the cache transfer and reports AbortError', async () => {
     let rejectNative!: (error: Error) => void;
     const cancelDownload = vi.fn<LocalWebViewCache['cancelDownload']>();
-    const cache = nativeCache({
+    const cache = cacheObject({
       cancelDownload,
       download: vi.fn<LocalWebViewCache['download']>(
         () =>
@@ -100,7 +100,7 @@ describe('native cache adapter', () => {
           })
       ),
     });
-    const adapter = createNativeCacheAdapter(cache);
+    const adapter = createNitroCacheAdapter(cache);
     const controller = new AbortController();
     const download = adapter.download({
       followRedirect: false,
@@ -118,13 +118,13 @@ describe('native cache adapter', () => {
     expect(cancelDownload).toHaveBeenCalledOnce();
   });
 
-  it('restores the typed byte-limit error rejected by native', async () => {
-    const cache = nativeCache({
+  it('restores the typed byte-limit error rejected by the cache object', async () => {
+    const cache = cacheObject({
       download: vi.fn<LocalWebViewCache['download']>(async () => {
         throw new Error('LOCAL_WEBVIEW_DOWNLOAD_LIMIT|100|101|https://example.com/payload.data');
       }),
     });
-    const adapter = createNativeCacheAdapter(cache);
+    const adapter = createNitroCacheAdapter(cache);
 
     await expect(
       adapter.download({

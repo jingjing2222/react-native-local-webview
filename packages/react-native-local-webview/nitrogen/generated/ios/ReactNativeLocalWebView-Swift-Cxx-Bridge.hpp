@@ -10,18 +10,18 @@
 // Forward declarations of C++ defined types
 // Forward declaration of `HybridLocalWebViewCacheSpec` to properly resolve imports.
 namespace margelo::nitro::localwebview { class HybridLocalWebViewCacheSpec; }
-// Forward declaration of `HybridNativeLocalWebViewSpec` to properly resolve imports.
-namespace margelo::nitro::localwebview { class HybridNativeLocalWebViewSpec; }
+// Forward declaration of `HybridLocalWebViewSpec` to properly resolve imports.
+namespace margelo::nitro::localwebview { class HybridLocalWebViewSpec; }
 
 // Forward declarations of Swift defined types
 // Forward declaration of `HybridLocalWebViewCacheSpec_cxx` to properly resolve imports.
 namespace ReactNativeLocalWebView { class HybridLocalWebViewCacheSpec_cxx; }
-// Forward declaration of `HybridNativeLocalWebViewSpec_cxx` to properly resolve imports.
-namespace ReactNativeLocalWebView { class HybridNativeLocalWebViewSpec_cxx; }
+// Forward declaration of `HybridLocalWebViewSpec_cxx` to properly resolve imports.
+namespace ReactNativeLocalWebView { class HybridLocalWebViewSpec_cxx; }
 
 // Include C++ defined types
 #include "HybridLocalWebViewCacheSpec.hpp"
-#include "HybridNativeLocalWebViewSpec.hpp"
+#include "HybridLocalWebViewSpec.hpp"
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/PromiseHolder.hpp>
 #include <NitroModules/Result.hpp>
@@ -138,17 +138,17 @@ namespace margelo::nitro::localwebview::bridge::swift {
     return Func_void_std__exception_ptr_Wrapper(std::move(value));
   }
 
-  // pragma MARK: std::shared_ptr<HybridNativeLocalWebViewSpec>
+  // pragma MARK: std::shared_ptr<HybridLocalWebViewSpec>
   /**
-   * Specialized version of `std::shared_ptr<HybridNativeLocalWebViewSpec>`.
+   * Specialized version of `std::shared_ptr<HybridLocalWebViewSpec>`.
    */
-  using std__shared_ptr_HybridNativeLocalWebViewSpec_ = std::shared_ptr<HybridNativeLocalWebViewSpec>;
-  std::shared_ptr<HybridNativeLocalWebViewSpec> create_std__shared_ptr_HybridNativeLocalWebViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept;
-  void* NON_NULL get_std__shared_ptr_HybridNativeLocalWebViewSpec_(std__shared_ptr_HybridNativeLocalWebViewSpec_ cppType);
+  using std__shared_ptr_HybridLocalWebViewSpec_ = std::shared_ptr<HybridLocalWebViewSpec>;
+  std::shared_ptr<HybridLocalWebViewSpec> create_std__shared_ptr_HybridLocalWebViewSpec_(void* NON_NULL swiftUnsafePointer) noexcept;
+  void* NON_NULL get_std__shared_ptr_HybridLocalWebViewSpec_(std__shared_ptr_HybridLocalWebViewSpec_ cppType);
 
-  // pragma MARK: std::weak_ptr<HybridNativeLocalWebViewSpec>
-  using std__weak_ptr_HybridNativeLocalWebViewSpec_ = std::weak_ptr<HybridNativeLocalWebViewSpec>;
-  inline std__weak_ptr_HybridNativeLocalWebViewSpec_ weakify_std__shared_ptr_HybridNativeLocalWebViewSpec_(const std::shared_ptr<HybridNativeLocalWebViewSpec>& strong) noexcept { return strong; }
+  // pragma MARK: std::weak_ptr<HybridLocalWebViewSpec>
+  using std__weak_ptr_HybridLocalWebViewSpec_ = std::weak_ptr<HybridLocalWebViewSpec>;
+  inline std__weak_ptr_HybridLocalWebViewSpec_ weakify_std__shared_ptr_HybridLocalWebViewSpec_(const std::shared_ptr<HybridLocalWebViewSpec>& strong) noexcept { return strong; }
 
   // pragma MARK: Result<void>
   using Result_void_ = Result<void>;

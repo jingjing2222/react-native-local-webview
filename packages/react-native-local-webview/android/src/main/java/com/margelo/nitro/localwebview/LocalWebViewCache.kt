@@ -34,7 +34,7 @@ private fun prepareCacheDestination(file: File) {
 
 private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
-private fun nativeDigestName(algorithm: String): String =
+private fun platformDigestName(algorithm: String): String =
   when (algorithm) {
     "sha256" -> "SHA-256"
     "sha384" -> "SHA-384"
@@ -42,7 +42,7 @@ private fun nativeDigestName(algorithm: String): String =
     else -> error("Unsupported hash algorithm: $algorithm")
   }
 
-class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
+class LocalWebViewCache : HybridLocalWebViewCacheSpec() {
   private val activeDownloads = ConcurrentHashMap<String, HttpURLConnection>()
   private val cancelledDownloads = ConcurrentHashMap.newKeySet<String>()
 
@@ -90,7 +90,7 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
           val algorithm = hashAlgorithms.getString(index)
           downloadDigests.putIfAbsent(
             algorithm,
-            MessageDigest.getInstance(nativeDigestName(algorithm)),
+            MessageDigest.getInstance(platformDigestName(algorithm)),
           )
         }
       }
@@ -212,7 +212,7 @@ class HybridLocalWebViewCache : HybridLocalWebViewCacheSpec() {
       val digests = linkedMapOf<String, MessageDigest>()
       for (index in 0 until algorithms.length()) {
         val algorithm = algorithms.getString(index)
-        digests.putIfAbsent(algorithm, MessageDigest.getInstance(nativeDigestName(algorithm)))
+        digests.putIfAbsent(algorithm, MessageDigest.getInstance(platformDigestName(algorithm)))
       }
       BufferedInputStream(FileInputStream(cacheFile(path))).use { input ->
         val buffer = ByteArray(1024 * 1024)

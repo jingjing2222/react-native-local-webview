@@ -25,7 +25,7 @@ function translateDownloadError(error: unknown): Error {
       : new Error(String(error));
 }
 
-export function createNativeCacheAdapter(cache: LocalWebViewCache): LocalWebViewCacheAdapter {
+export function createNitroCacheAdapter(cache: LocalWebViewCache): LocalWebViewCacheAdapter {
   return {
     directories: { documents: cache.documentsDirectory },
     copyFile: (source, destination) => cache.copyFile(source, destination),
@@ -74,8 +74,8 @@ export function createNativeCacheAdapter(cache: LocalWebViewCache): LocalWebView
   };
 }
 
-export function getNativeCacheAdapter(): LocalWebViewCacheAdapter {
-  return (adapter ??= createNativeCacheAdapter(
+export function getCacheAdapter(): LocalWebViewCacheAdapter {
+  return (adapter ??= createNitroCacheAdapter(
     NitroModules.createHybridObject<LocalWebViewCache>('LocalWebViewCache')
   ));
 }

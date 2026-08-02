@@ -9,24 +9,24 @@
     "androidCxxLibName": "reactnativelocalwebview"
   },
   "autolinking": {
-    "NativeLocalWebView": {
+    "LocalWebView": {
       "ios": {
         "language": "swift",
-        "implementationClassName": "HybridLocalWebView"
+        "implementationClassName": "LocalWebView"
       },
       "android": {
         "language": "kotlin",
-        "implementationClassName": "HybridNativeLocalWebView"
+        "implementationClassName": "LocalWebView"
       }
     },
     "LocalWebViewCache": {
       "ios": {
         "language": "swift",
-        "implementationClassName": "HybridLocalWebViewCache"
+        "implementationClassName": "LocalWebViewCache"
       },
       "android": {
         "language": "kotlin",
-        "implementationClassName": "HybridLocalWebViewCache"
+        "implementationClassName": "LocalWebViewCache"
       }
     }
   },

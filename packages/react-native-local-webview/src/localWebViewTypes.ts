@@ -118,7 +118,7 @@ export interface WebViewProps extends ViewProps {
   mixedContentMode?: 'always' | 'compatibility' | 'never';
   nativeConfig?: {
     /**
-     * Extra properties for the built-in Nitro native view.
+     * Extra properties for the built-in Nitro view.
      * Replacing the component itself is intentionally unsupported.
      */
     props?: Record<string, unknown>;

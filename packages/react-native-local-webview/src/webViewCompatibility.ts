@@ -187,7 +187,7 @@ export function isOriginAllowed(url: string, whitelist: readonly string[]): bool
   });
 }
 
-export function nativeConfigurationFromProps(props: WebViewProps): Record<string, unknown> {
+export function configurationFromProps(props: WebViewProps): Record<string, unknown> {
   const configuration: Record<string, unknown> = {};
   for (const name of NATIVE_CONFIGURATION_PROP_NAMES) {
     const value = props[name];

@@ -1,15 +1,10 @@
-export {
-  NativeLocalWebView,
-  NativeLocalWebView as LocalWebView,
-} from './NativeLocalWebView.native';
+export { LocalWebView } from './LocalWebView.native';
 export type { LocalWebViewHistoryState } from './historyState';
 export type {
-  NativeLocalWebViewComponent,
-  NativeLocalWebViewHandle,
-  NativeLocalWebViewHandle as LocalWebViewHandle,
-  NativeLocalWebViewProps,
-  NativeLocalWebViewProps as LocalWebViewProps,
-} from './NativeLocalWebView.native';
+  LocalWebViewComponent,
+  LocalWebViewHandle,
+  LocalWebViewProps,
+} from './LocalWebView.native';
 export type {
   FileDownloadEvent,
   ShouldStartLoadRequest,
@@ -36,7 +31,7 @@ export {
   readMirroredWebBundle,
   rollbackWebBundle,
   resolveWebBundle,
-} from './nativeWebBundle';
+} from './webBundle';
 export {
   ANDROID_WEBVIEW_PROP_NAMES,
   IOS_WEBVIEW_PROP_NAMES,
@@ -46,5 +41,10 @@ export {
   WEBVIEW_PROP_NAMES,
   WINDOWS_WEBVIEW_PROP_NAMES,
 } from './webViewCompatibility';
-export type { CachePolicy, MirroredLocalAsset, MirroredWebBundle } from './mirrorWebBundle';
-export type { ResolveWebBundleOptions } from './nativeWebBundle';
+export type {
+  CachePolicy,
+  MirroredLocalAsset,
+  MirroredWebBundle,
+  WebBundleValidationMode,
+} from './mirrorWebBundle';
+export type { ResolveWebBundleOptions } from './webBundle';

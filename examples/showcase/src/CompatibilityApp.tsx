@@ -573,7 +573,7 @@ export default function CompatibilityApp({
     }
     const missing = cases.map(({ name }) => name).filter((name) => !passed.includes(name));
     if (missing.length > 0) {
-      throw new Error(`Props without a completed native mount: ${missing.join(', ')}`);
+      throw new Error(`Props without a completed view mount: ${missing.join(', ')}`);
     }
     const fileUploadSupported = await LocalWebView.isFileUploadSupported();
     if (!fileUploadSupported) throw new Error('Native file upload support is unavailable.');

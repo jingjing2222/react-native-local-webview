@@ -1,8 +1,9 @@
 import type { HybridView, HybridViewMethods, HybridViewProps } from 'react-native-nitro-modules';
 
-export interface LocalWebViewNativeProps extends HybridViewProps {
+export interface LocalWebViewViewProps extends HybridViewProps {
   assetsJson: string;
   baseUrl: string;
+  cacheRequestJson: string;
   configurationJson: string;
   documentId: string;
   html: string;
@@ -11,7 +12,7 @@ export interface LocalWebViewNativeProps extends HybridViewProps {
   onShouldStartLoadWithRequest: (request: string) => boolean;
 }
 
-export interface LocalWebViewNativeMethods extends HybridViewMethods {
+export interface LocalWebViewViewMethods extends HybridViewMethods {
   clearCache(includeDiskFiles: boolean): void;
   clearFormData(): void;
   clearHistory(): void;
@@ -24,4 +25,4 @@ export interface LocalWebViewNativeMethods extends HybridViewMethods {
   stopLoading(): void;
 }
 
-export type NativeLocalWebView = HybridView<LocalWebViewNativeProps, LocalWebViewNativeMethods>;
+export type LocalWebView = HybridView<LocalWebViewViewProps, LocalWebViewViewMethods>;

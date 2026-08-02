@@ -2,10 +2,7 @@ import { parse, type Node } from 'parse5';
 import { describe, expect, it } from 'vitest';
 
 import { ContentSecurityPolicyError } from '../src/resourceGraph';
-import {
-  prepareNativeWebViewDocument,
-  prepareWebViewDocument,
-} from '../src/prepareWebViewDocument';
+import { prepareRuntimeDocument, prepareWebViewDocument } from '../src/prepareWebViewDocument';
 
 type HtmlNode = Node;
 
@@ -97,29 +94,29 @@ describe('prepareWebViewDocument', () => {
   });
 });
 
-describe('prepareNativeWebViewDocument', () => {
+describe('prepareRuntimeDocument', () => {
   it('does not install JS transport or History API shims', () => {
-    const html = '<!doctype html><html><head></head><body>native</body></html>';
-    expect(prepareNativeWebViewDocument(html)).toBe(html);
+    const html = '<!doctype html><html><head></head><body>runtime</body></html>';
+    expect(prepareRuntimeDocument(html)).toBe(html);
   });
 
   it('applies the same explicit meta CSP bypass policy', () => {
     const html =
       '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src none"></head><body></body></html>';
-    expect(() => prepareNativeWebViewDocument(html)).toThrow(ContentSecurityPolicyError);
-    expect(prepareNativeWebViewDocument(html, true)).not.toContain('Content-Security-Policy');
+    expect(() => prepareRuntimeDocument(html)).toThrow(ContentSecurityPolicyError);
+    expect(prepareRuntimeDocument(html, true)).not.toContain('Content-Security-Policy');
   });
 
-  it('places a native document-start script before page scripts', () => {
-    const prepared = prepareNativeWebViewDocument(
+  it('places a document-start script before page scripts', () => {
+    const prepared = prepareRuntimeDocument(
       '<!doctype html><html><head><script>globalThis.order = ["page"]</script></head></html>',
       false,
-      'globalThis.order = ["native"]'
+      'globalThis.order = ["runtime"]'
     );
 
-    expect(prepared.indexOf('globalThis.order = ["native"]')).toBeLessThan(
+    expect(prepared.indexOf('globalThis.order = ["runtime"]')).toBeLessThan(
       prepared.indexOf('globalThis.order = ["page"]')
     );
-    expect(prepared).toContain('data-local-webview-native-bootstrap');
+    expect(prepared).toContain('data-local-webview-bootstrap');
   });
 });

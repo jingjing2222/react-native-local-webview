@@ -10,7 +10,7 @@
 #import "ReactNativeLocalWebView-Swift-Cxx-Umbrella.hpp"
 #import <type_traits>
 
-#include "HybridNativeLocalWebViewSpecSwift.hpp"
+#include "HybridLocalWebViewSpecSwift.hpp"
 #include "HybridLocalWebViewCacheSpecSwift.hpp"
 
 @interface ReactNativeLocalWebViewAutolinking : NSObject
@@ -23,9 +23,9 @@
   using namespace margelo::nitro::localwebview;
 
   HybridObjectRegistry::registerHybridObjectConstructor(
-    "NativeLocalWebView",
+    "LocalWebView",
     []() -> std::shared_ptr<HybridObject> {
-      std::shared_ptr<HybridNativeLocalWebViewSpec> hybridObject = ReactNativeLocalWebView::ReactNativeLocalWebViewAutolinking::createNativeLocalWebView();
+      std::shared_ptr<HybridLocalWebViewSpec> hybridObject = ReactNativeLocalWebView::ReactNativeLocalWebViewAutolinking::createLocalWebView();
       return hybridObject;
     }
   );

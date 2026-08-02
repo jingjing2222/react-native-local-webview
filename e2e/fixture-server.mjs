@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -14,11 +15,17 @@ const PUBLIC_ORIGIN =
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const WORDLY_DIRECTORY = await prepareUnityFixture();
 const WORKER_SOURCE = await readFile(join(ROOT, 'fixtures/unity/probe.worker.js'));
+const RELEASE_FINGERPRINT = createHash('sha256')
+  .update(await readFile(fileURLToPath(import.meta.url)))
+  .update(WORKER_SOURCE);
+for (const fileName of ['Builds.data', 'Builds.framework.js', 'Builds.loader.js', 'Builds.wasm']) {
+  RELEASE_FINGERPRINT.update(await readFile(join(WORDLY_DIRECTORY, fileName)));
+}
+const RELEASE_DIGEST = RELEASE_FINGERPRINT.digest('base64url');
 const PADDING = Buffer.alloc(1024 * 1024);
 const GAME_SIZES = new Set([50, 200, 500]);
 const RESOURCE_COUNTS = new Set([100, 500, 1000]);
 const COOKIE = 'local-webview-benchmark=allowed';
-const ETAG_VERSION = 'v3';
 const COMPATIBILITY_DOCUMENT = Buffer.from(`<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Local WebView compatibility</title></head>
@@ -95,7 +102,15 @@ function contentType(pathname) {
 }
 
 function requestEtag(pathname, hasEtag) {
-  return hasEtag ? `"${ETAG_VERSION}-${Buffer.from(pathname).toString('base64url')}"` : undefined;
+  return hasEtag
+    ? `"${createHash('sha256').update(RELEASE_DIGEST).update(pathname).digest('base64url')}"`
+    : undefined;
+}
+
+function releaseEtag(release, hasEtag = true) {
+  return hasEtag
+    ? `"bundle-${createHash('sha256').update(RELEASE_DIGEST).update(release).digest('base64url')}"`
+    : undefined;
 }
 
 function parseRange(value, total) {
@@ -672,8 +687,9 @@ async function handleFixture(request, response, url) {
     if (!RESOURCE_COUNTS.has(count)) return false;
     const prefix = `/resources/${count}`;
     const query = benchmarkQuery(url);
+    const isEntry = !resourceMatch[2] || resourceMatch[2] === '/index.html';
     let body;
-    if (!resourceMatch[2] || resourceMatch[2] === '/index.html') {
+    if (isEntry) {
       body = resourceDocument(prefix, count, query);
     } else {
       const asset = /^\/assets\/(\d+)\.js$/.exec(resourceMatch[2]);
@@ -683,7 +699,7 @@ async function handleFixture(request, response, url) {
       );
     }
     respondBytes(request, response, pathname, body, {
-      etag: requestEtag(pathname, true),
+      etag: isEntry ? releaseEtag(`${prefix}${query}`) : requestEtag(pathname, true),
     });
     return true;
   }
@@ -711,7 +727,10 @@ async function handleFixture(request, response, url) {
     });
     return true;
   }
-  const etag = requestEtag(pathname, hasEtag);
+  const etag =
+    suffix === '/index.html'
+      ? releaseEtag(`${prefix}${query}`, hasEtag)
+      : requestEtag(pathname, hasEtag);
   if (suffix === '/index.html') {
     respondBytes(request, response, pathname, gameDocument(prefix, sizeMiB, query), {
       etag,

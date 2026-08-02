@@ -45,6 +45,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.net.URI
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -56,6 +57,11 @@ private data class LocalAsset(
   val path: String,
   val responseHeaders: Map<String, String>,
   val size: Long,
+)
+
+private data class CachedDocument(
+  val baseUrl: String,
+  val html: String,
 )
 
 private data class ByteRange(
@@ -96,7 +102,7 @@ private class BoundedFileInputStream(
 
 private class LocalRuntimeWebView(
   context: android.content.Context,
-  private val owner: HybridNativeLocalWebView,
+  private val owner: LocalWebView,
 ) : WebView(context) {
   override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
     super.onSizeChanged(width, height, oldWidth, oldHeight)
@@ -110,7 +116,7 @@ private class LocalRuntimeWebView(
 }
 
 private class LocalJavaScriptBridge(
-  private val owner: HybridNativeLocalWebView,
+  private val owner: LocalWebView,
 ) {
   @JavascriptInterface
   fun postMessage(message: String) {
@@ -119,7 +125,7 @@ private class LocalJavaScriptBridge(
 }
 
 private class LocalRuntimeWebViewClient(
-  private val owner: HybridNativeLocalWebView,
+  private val owner: LocalWebView,
 ) : WebViewClient() {
   override fun shouldInterceptRequest(
     view: WebView,
@@ -194,7 +200,7 @@ private class LocalRuntimeWebViewClient(
 }
 
 private class LocalRuntimeChromeClient(
-  private val owner: HybridNativeLocalWebView,
+  private val owner: LocalWebView,
 ) : WebChromeClient() {
   override fun onProgressChanged(view: WebView, newProgress: Int) {
     owner.emit("loadProgress", mapOf("progress" to newProgress / 100.0))
@@ -255,14 +261,15 @@ private class LocalRuntimeChromeClient(
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-class HybridNativeLocalWebView(
+class LocalWebView(
   private val context: ThemedReactContext,
-) : HybridNativeLocalWebViewSpec() {
+) : HybridLocalWebViewSpec() {
   private val container = FrameLayout(context)
   private val webView = LocalRuntimeWebView(context, this)
   private val assets = mutableMapOf<String, LocalAsset>()
   private var loadedDocumentId = ""
   private var mainFrameLoadFailed = false
+  private var cacheMiss = false
   private var messagingEnabled = false
   private var usesWebMessageListener = false
   private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
@@ -350,6 +357,7 @@ class HybridNativeLocalWebView(
 
   override var assetsJson = "[]"
   override var baseUrl = ""
+  override var cacheRequestJson = ""
   override var configurationJson = "{}"
   override var documentId = ""
   override var html = ""
@@ -384,9 +392,23 @@ class HybridNativeLocalWebView(
         configuration = JSONObject(configurationJson)
         applyConfiguration()
         if (documentId.isNotEmpty() && documentId != loadedDocumentId) {
-          configureAssets()
           loadedDocumentId = documentId
-          if (sourceJson.isEmpty()) {
+          cacheMiss = false
+          if (cacheRequestJson.isNotEmpty()) {
+            val request = JSONObject(cacheRequestJson)
+            val cached = configureCachedAssets(request)
+            if (cached == null) {
+              assets.clear()
+              cacheMiss = true
+              baseUrl = request.getString("virtualUrl")
+              webView.loadUrl(baseUrl)
+            } else {
+              baseUrl = cached.baseUrl
+              html = cached.html
+              webView.loadUrl(baseUrl)
+            }
+          } else if (sourceJson.isEmpty()) {
+            configureAssets()
             if (assets.containsKey(normalize(baseUrl))) {
               webView.loadUrl(baseUrl)
             } else {
@@ -668,6 +690,167 @@ class HybridNativeLocalWebView(
     }
   }
 
+  private fun configureCachedAssets(request: JSONObject): CachedDocument? {
+    val cachePath = request.getString("cacheDirectory")
+    val cacheDirectory =
+      if (cachePath.startsWith("file://")) File(URI(cachePath)) else File(cachePath)
+    val virtualUrl = request.getString("virtualUrl")
+    val expectedFingerprint = request.getString("securityPolicyFingerprint")
+    val expectedValidationMode = request.getString("validationMode")
+    val maxBytes = request.getLong("maxBytes")
+    val requestedGenerationId = request.optNullableString("generationId")
+    if (
+      !virtualUrl.startsWith("https://") ||
+        !FINGERPRINT_PATTERN.matches(expectedFingerprint) ||
+        maxBytes <= 0
+    ) {
+      return null
+    }
+    val state =
+      readJsonObject(File(cacheDirectory, "state.json"))
+        ?.takeIf(::validCacheState)
+        ?: readJsonObject(File(cacheDirectory, "state.previous.json"))
+          ?.takeIf(::validCacheState)
+        ?: return null
+    val summaries = state.getJSONArray("generations")
+    val ordered = mutableListOf<String>()
+    if (requestedGenerationId != null) {
+      ordered.add(requestedGenerationId)
+    } else {
+      ordered.add(state.getString("activeGeneration"))
+      for (index in 0 until summaries.length()) {
+        val generationId = summaries.getJSONObject(index).getString("generationId")
+        if (generationId !in ordered) ordered.add(generationId)
+      }
+    }
+    for (generationId in ordered) {
+      if (!GENERATION_ID_PATTERN.matches(generationId)) continue
+      val summary =
+        (0 until summaries.length())
+          .map { summaries.getJSONObject(it) }
+          .firstOrNull { it.optString("generationId") == generationId }
+          ?: continue
+      val totalBytes = summary.optLong("totalBytes", -1)
+      if (
+        summary.optString("securityPolicyFingerprint") != expectedFingerprint ||
+          totalBytes < 0 ||
+          totalBytes > maxBytes
+      ) {
+        continue
+      }
+      val generationDirectory = File(File(cacheDirectory, "generations"), generationId)
+      val manifest =
+        readJsonObject(File(generationDirectory, "manifest.json")) ?: continue
+      if (
+        manifest.optInt("formatVersion") != CACHE_FORMAT_VERSION ||
+          manifest.optString("generationId") != generationId ||
+          manifest.optString("securityPolicyFingerprint") != expectedFingerprint ||
+          manifest.optString("validationMode") != expectedValidationMode ||
+          manifest.optLong("totalBytes", -1) != totalBytes ||
+          normalize(manifest.optString("entryUrl")) != normalize(virtualUrl) ||
+          (expectedValidationMode == "release-etag" &&
+            manifest.optString("bundleEtag").isEmpty())
+      ) {
+        continue
+      }
+      val source = File(generationDirectory, "index.html")
+      if (!source.isFile) continue
+      val nextAssets = mutableMapOf<String, LocalAsset>()
+      val remoteAssets = manifest.optJSONArray("remoteAssets") ?: continue
+      var valid = true
+      for (index in 0 until remoteAssets.length()) {
+        val value = remoteAssets.optJSONObject(index)
+        if (value == null) {
+          valid = false
+          break
+        }
+        if (value.optString("delivery") != "file") continue
+        val sha256 = value.optString("sha256")
+        val localFile = value.optString("localFile")
+        val originalUrl = value.optString("url")
+        val responseUrl = value.optString("responseUrl")
+        val size = value.optLong("size", -1)
+        if (
+          !FINGERPRINT_PATTERN.matches(sha256) ||
+            localFile != "assets/$sha256" ||
+            !originalUrl.startsWith("https://") ||
+            !responseUrl.startsWith("https://") ||
+            size < 0
+        ) {
+          valid = false
+          break
+        }
+        val descriptor =
+          LocalAsset(
+            mediaType = value.optString("mediaType", "application/octet-stream"),
+            path = File(generationDirectory, localFile).absolutePath,
+            responseHeaders =
+              value.optJSONObject("responseHeaders")?.toStringMap().orEmpty(),
+            size = size,
+          )
+        nextAssets[normalize(originalUrl)] = descriptor
+        nextAssets[normalize(responseUrl)] = descriptor
+      }
+      if (!valid) continue
+      val documentUrl = manifest.optString("documentUrl")
+      if (!documentUrl.startsWith("https://")) continue
+      val inherited = manifest.optBoolean("documentFragmentInherited")
+      val fragment =
+        if (inherited) Uri.parse(virtualUrl).encodedFragment
+        else manifest.optString("documentFragment").removePrefix("#").ifEmpty { null }
+      val runtimeUrl = Uri.parse(documentUrl).buildUpon().encodedFragment(fragment).build().toString()
+      val sourceHtml = prepareCachedHtml(source.readText(Charsets.UTF_8))
+      nextAssets[normalize(runtimeUrl)] =
+        LocalAsset(
+          mediaType = "text/html",
+          path = source.absolutePath,
+          responseHeaders = emptyMap(),
+          size = sourceHtml.toByteArray(Charsets.UTF_8).size.toLong(),
+        )
+      assets.clear()
+      assets.putAll(nextAssets)
+      return CachedDocument(baseUrl = runtimeUrl, html = sourceHtml)
+    }
+    return null
+  }
+
+  private fun prepareCachedHtml(source: String): String {
+    val script = configuration.optNullableString("documentStartScript") ?: return source
+    if (script.isEmpty()) return source
+    val head = Regex("<head(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE).find(source)
+      ?: error("Cached HTML document does not contain a <head>.")
+    val bootstrap =
+      "<script data-local-webview-bootstrap>${script.escapeScriptRawText()}</script>"
+    return source.replaceRange(head.range.last + 1, head.range.last + 1, bootstrap)
+  }
+
+  private fun readJsonObject(file: File): JSONObject? =
+    try {
+      if (file.isFile) JSONObject(file.readText(Charsets.UTF_8)) else null
+    } catch (_: Throwable) {
+      null
+    }
+
+  private fun validCacheState(state: JSONObject): Boolean {
+    if (state.optInt("formatVersion") != CACHE_FORMAT_VERSION) return false
+    val active = state.optString("activeGeneration")
+    if (!GENERATION_ID_PATTERN.matches(active)) return false
+    val generations = state.optJSONArray("generations") ?: return false
+    for (index in 0 until generations.length()) {
+      val summary = generations.optJSONObject(index) ?: return false
+      if (
+        !GENERATION_ID_PATTERN.matches(summary.optString("generationId")) ||
+          !FINGERPRINT_PATTERN.matches(summary.optString("securityPolicyFingerprint")) ||
+          summary.optLong("totalBytes", -1) < 0
+      ) {
+        return false
+      }
+    }
+    return (0 until generations.length()).any {
+      generations.getJSONObject(it).optString("generationId") == active
+    }
+  }
+
   private fun loadDirectSource() {
     val source = JSONObject(sourceJson)
     val uri = source.getString("uri")
@@ -835,6 +1018,7 @@ class HybridNativeLocalWebView(
     // react-native-webview onPageStarted fallback for those requests.
     if (
       sourceJson.isNotEmpty() ||
+        cacheMiss ||
         configuration.optBoolean("isDirectHtmlSource", false)
     ) {
       val beforeScript =
@@ -1285,11 +1469,14 @@ class HybridNativeLocalWebView(
 
   companion object {
     private const val BRIDGE_NAME = "ReactNativeWebView"
+    private const val CACHE_FORMAT_VERSION = 14
     private const val FILE_CHOOSER_REQUEST_CODE = 51_874
     private const val HISTORY_MESSAGE_PREFIX =
       "{\"channel\":\"react-native-local-webview:history\""
     private const val PERMISSION_REQUEST_CODE = 51_875
     private const val SHOULD_START_TIMEOUT_MILLISECONDS = 250L
+    private val FINGERPRINT_PATTERN = Regex("^[a-f0-9]{64}$")
+    private val GENERATION_ID_PATTERN = Regex("^\\d+-\\d+-[a-f0-9]{8}-[a-f0-9]{8}$")
   }
 }
 

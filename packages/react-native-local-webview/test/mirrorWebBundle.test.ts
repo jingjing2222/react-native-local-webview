@@ -7,7 +7,7 @@ import {
 } from '../src/localWebViewCacheAdapter';
 import type { ResolveWebBundleOptions } from '../src/mirrorWebBundle';
 
-const native = vi.hoisted(() => {
+const storage = vi.hoisted(() => {
   type Response = {
     body?: string | Uint8Array;
     etag?: string;
@@ -19,7 +19,7 @@ const native = vi.hoisted(() => {
   };
 
   return {
-    blobConfigs: [] as Array<{
+    downloadOptions: [] as Array<{
       followRedirect?: boolean;
       overwrite?: boolean;
       path?: string;
@@ -36,6 +36,7 @@ const native = vi.hoisted(() => {
 
 import {
   cacheDirectoryForOrigin as cacheDirectoryForOriginWithAdapter,
+  createWebBundleCacheRequest,
   readMirroredWebBundle as readMirroredWebBundleWithAdapter,
   retainWebBundle,
   resolveWebBundle as resolveWebBundleWithAdapter,
@@ -48,19 +49,19 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 function removePath(path: string): void {
-  native.files.delete(path);
-  for (const file of native.files.keys()) {
-    if (file.startsWith(`${path}/`)) native.files.delete(file);
+  storage.files.delete(path);
+  for (const file of storage.files.keys()) {
+    if (file.startsWith(`${path}/`)) storage.files.delete(file);
   }
-  for (const directory of native.directories) {
+  for (const directory of storage.directories) {
     if (directory === path || directory.startsWith(`${path}/`)) {
-      native.directories.delete(directory);
+      storage.directories.delete(directory);
     }
   }
 }
 
 function file(path: string): Uint8Array {
-  const value = native.files.get(path);
+  const value = storage.files.get(path);
   if (!value) throw new Error(`Missing file: ${path}`);
   return value;
 }
@@ -70,22 +71,22 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     documents: '/documents',
   },
   async copyFile(source, destination) {
-    native.copies.push({ destination, source });
-    native.files.set(destination, file(source).slice());
+    storage.copies.push({ destination, source });
+    storage.files.set(destination, file(source).slice());
   },
   async download(options) {
     if (options.signal?.aborted) {
       throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
     }
-    native.blobConfigs.push({
+    storage.downloadOptions.push({
       followRedirect: options.followRedirect,
       overwrite: options.overwrite,
       path: options.path,
       timeout: options.timeoutMs,
     });
-    const response = native.responses.get(options.url);
+    const response = storage.responses.get(options.url);
     const etag = options.headers?.['If-None-Match'];
-    native.requests.push({
+    storage.requests.push({
       etag,
       ...(options.headers?.Origin ? { origin: options.headers.Origin } : {}),
       url: options.url,
@@ -101,7 +102,7 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
       throw new LocalWebViewDownloadLimitError(options.url, options.maxBytes, bytes.byteLength);
     }
     if (status >= 200 && status < 300) {
-      native.files.set(options.path, bytes);
+      storage.files.set(options.path, bytes);
     }
     return {
       headers: {
@@ -115,7 +116,7 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     };
   },
   async exists(path) {
-    return native.files.has(path) || native.directories.has(path);
+    return storage.files.has(path) || storage.directories.has(path);
   },
   async hashFile(path, algorithms) {
     const value = file(path);
@@ -132,7 +133,7 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
   async listDirectory(path) {
     const children = new Set<string>();
     const prefix = `${path}/`;
-    for (const candidate of [...native.directories, ...native.files.keys()]) {
+    for (const candidate of [...storage.directories, ...storage.files.keys()]) {
       if (!candidate.startsWith(prefix)) continue;
       const child = candidate.slice(prefix.length).split('/')[0];
       if (child) children.add(child);
@@ -140,12 +141,12 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     return [...children];
   },
   async makeDirectory(path) {
-    native.directories.add(path);
+    storage.directories.add(path);
   },
   async moveFile(source, destination) {
-    native.moves.push({ destination, source });
-    native.files.set(destination, file(source));
-    native.files.delete(source);
+    storage.moves.push({ destination, source });
+    storage.files.set(destination, file(source));
+    storage.files.delete(source);
   },
   async readFile(path, encoding) {
     const value = file(path);
@@ -162,7 +163,7 @@ const cacheAdapter: LocalWebViewCacheAdapter = {
     return { size: file(path).byteLength };
   },
   async writeFile(path, value, encoding) {
-    native.files.set(path, encoding === 'base64' ? toByteArray(value) : encoder.encode(value));
+    storage.files.set(path, encoding === 'base64' ? toByteArray(value) : encoder.encode(value));
   },
 };
 
@@ -194,12 +195,12 @@ function rollbackWebBundle(
 }
 
 function serve(version: string): void {
-  native.responses.set(ENTRY, {
+  storage.responses.set(ENTRY, {
     body: '<!doctype html><script type="module" src="/assets/app.js"></script>',
     etag: '"entry-1"',
     mediaType: 'text/html',
   });
-  native.responses.set(SCRIPT, {
+  storage.responses.set(SCRIPT, {
     body: `document.body.dataset.version = ${JSON.stringify(version)}`,
     etag: `"script-${version}"`,
     mediaType: 'text/javascript',
@@ -207,19 +208,47 @@ function serve(version: string): void {
 }
 
 beforeEach(() => {
-  native.directories.clear();
-  native.directories.add('/documents');
-  native.directories.add('/temporary');
-  native.files.clear();
-  native.blobConfigs.length = 0;
-  native.copies.length = 0;
-  native.moves.length = 0;
-  native.requests.length = 0;
-  native.responses.clear();
+  storage.directories.clear();
+  storage.directories.add('/documents');
+  storage.directories.add('/temporary');
+  storage.files.clear();
+  storage.downloadOptions.length = 0;
+  storage.copies.length = 0;
+  storage.moves.length = 0;
+  storage.requests.length = 0;
+  storage.responses.clear();
   serve('one');
 });
 
 describe('resolveWebBundle', () => {
+  it('serializes the cache policy required by the storage warm-start loader', () => {
+    const request = createWebBundleCacheRequest({
+      allowContentSecurityPolicyBypass: true,
+      cacheDirectory: '/documents/origin',
+      cachePolicy: { maxBytes: 1234, maxGenerations: 3, maxInlineBytes: 567 },
+      generationId: '1-2-12345678-90abcdef',
+      trustedAssetOrigins: ['https://cdn.example'],
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+
+    expect(request).toMatchObject({
+      cacheDirectory: '/documents/origin',
+      generationId: '1-2-12345678-90abcdef',
+      maxBytes: 1234,
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+    expect(request.securityPolicyFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      createWebBundleCacheRequest({
+        cacheDirectory: '/documents/origin',
+        validationMode: 'content-hash',
+        virtualUrl: ENTRY,
+      }).securityPolicyFingerprint
+    ).not.toBe(request.securityPolicyFingerprint);
+  });
+
   it('commits a complete origin-scoped generation', async () => {
     const progress: string[] = [];
     const bundle = await resolveWebBundle({
@@ -241,11 +270,11 @@ describe('resolveWebBundle', () => {
   it('isolates origins that collide under filename character replacement', async () => {
     const ipv6Entry = 'https://[2606:4700:4700::1111]/';
     const underscoreEntry = 'https://_2606_4700_4700__1111_/';
-    native.responses.set(ipv6Entry, {
+    storage.responses.set(ipv6Entry, {
       body: '<!doctype html><html><head></head><body>ipv6</body></html>',
       mediaType: 'text/html',
     });
-    native.responses.set(underscoreEntry, {
+    storage.responses.set(underscoreEntry, {
       body: '<!doctype html><html><head></head><body>underscore</body></html>',
       mediaType: 'text/html',
     });
@@ -267,9 +296,9 @@ describe('resolveWebBundle', () => {
   it('removes orphaned generations from an obsolete cache format', async () => {
     const cacheDirectory = cacheDirectoryForOrigin(ENTRY);
     const obsoleteDirectory = `${cacheDirectory}/generations/obsolete`;
-    native.directories.add(`${cacheDirectory}/generations`);
-    native.directories.add(obsoleteDirectory);
-    native.files.set(
+    storage.directories.add(`${cacheDirectory}/generations`);
+    storage.directories.add(obsoleteDirectory);
+    storage.files.set(
       `${cacheDirectory}/state.json`,
       new TextEncoder().encode(
         JSON.stringify({
@@ -279,16 +308,16 @@ describe('resolveWebBundle', () => {
         })
       )
     );
-    native.files.set(`${obsoleteDirectory}/index.html`, new TextEncoder().encode('obsolete'));
+    storage.files.set(`${obsoleteDirectory}/index.html`, new TextEncoder().encode('obsolete'));
 
     await resolveWebBundle({ virtualUrl: ENTRY });
 
-    expect(native.files.has(`${obsoleteDirectory}/index.html`)).toBe(false);
+    expect(storage.files.has(`${obsoleteDirectory}/index.html`)).toBe(false);
   });
 
   it('revalidates every asset with its own ETag and reuses an unchanged generation', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     const second = await resolveWebBundle({ virtualUrl: ENTRY });
 
@@ -296,7 +325,7 @@ describe('resolveWebBundle', () => {
       generationId: first.generationId,
       usedCachedBundle: true,
     });
-    expect(native.requests).toEqual(
+    expect(storage.requests).toEqual(
       expect.arrayContaining([
         { etag: '"entry-1"', url: ENTRY },
         { etag: '"script-one"', url: SCRIPT },
@@ -304,7 +333,85 @@ describe('resolveWebBundle', () => {
     );
   });
 
-  it('uses native response metadata without stat or empty-file cleanup round trips', async () => {
+  it('revalidates one required bundle ETag without hashing local generation files', async () => {
+    const wasmUrl = 'https://app.example/assets/game.wasm';
+    storage.responses.get(ENTRY)!.body =
+      '<!doctype html><script type="module" src="/assets/app.js"></script><link rel="preload" as="fetch" href="/assets/game.wasm">';
+    storage.responses.set(wasmUrl, {
+      body: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]),
+      etag: '"game-wasm-1"',
+      mediaType: 'application/wasm',
+    });
+    const first = await resolveWebBundle({
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+    expect(first.localAssets[wasmUrl]).toBeDefined();
+    storage.requests.length = 0;
+    const localHashCalls: string[] = [];
+    const observedAdapter: LocalWebViewCacheAdapter = {
+      ...cacheAdapter,
+      async hashFile(path, algorithms) {
+        if (path.includes(`/generations/${first.generationId}/`)) localHashCalls.push(path);
+        return cacheAdapter.hashFile(path, algorithms);
+      },
+    };
+
+    const second = await resolveWebBundleWithAdapter({
+      cacheAdapter: observedAdapter,
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+
+    expect(second).toMatchObject({
+      generationId: first.generationId,
+      usedCachedBundle: true,
+    });
+    expect(storage.requests).toEqual([{ etag: '"entry-1"', url: ENTRY }]);
+    expect(localHashCalls).toEqual([]);
+  });
+
+  it('requires the entry ETag before publishing a release-etag generation', async () => {
+    storage.responses.get(ENTRY)!.etag = undefined;
+    const cacheDirectory = cacheDirectoryForOrigin(ENTRY);
+
+    await expect(
+      resolveWebBundle({ validationMode: 'release-etag', virtualUrl: ENTRY })
+    ).rejects.toThrow('entry response to include an ETag');
+
+    expect(storage.files.has(`${cacheDirectory}/state.json`)).toBe(false);
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY]);
+  });
+
+  it('builds a new generation when the required bundle ETag changes', async () => {
+    const first = await resolveWebBundle({
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+    serve('two');
+    storage.responses.get(ENTRY)!.etag = '"entry-2"';
+    storage.requests.length = 0;
+
+    const second = await resolveWebBundle({
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+
+    expect(second.generationId).not.toBe(first.generationId);
+    expect(storage.requests[0]).toEqual({ etag: '"entry-1"', url: ENTRY });
+    await expect(readMirroredWebBundle(second.sourcePath)).resolves.toContain('two');
+  });
+
+  it('reports a missing required bundle ETag during revalidation', async () => {
+    await resolveWebBundle({ validationMode: 'release-etag', virtualUrl: ENTRY });
+    storage.responses.get(ENTRY)!.etag = undefined;
+
+    await expect(
+      resolveWebBundle({ validationMode: 'release-etag', virtualUrl: ENTRY })
+    ).rejects.toThrow('entry response to include an ETag');
+  });
+
+  it('uses storage response metadata without stat or empty-file cleanup round trips', async () => {
     let temporaryExistsCalls = 0;
     let temporaryHashCalls = 0;
     let temporaryRemoveCalls = 0;
@@ -315,7 +422,7 @@ describe('resolveWebBundle', () => {
       async download(options) {
         const result = await cacheAdapter.download(options);
         const wroteFile =
-          result.status >= 200 && result.status < 300 && native.files.has(options.path);
+          result.status >= 200 && result.status < 300 && storage.files.has(options.path);
         return {
           ...result,
           bytesWritten: wroteFile ? file(options.path).byteLength : 0,
@@ -368,7 +475,7 @@ describe('resolveWebBundle', () => {
   });
 
   it('keeps a bodyless successful response as an empty resource', async () => {
-    native.responses.set(SCRIPT, {
+    storage.responses.set(SCRIPT, {
       etag: '"empty-script"',
       mediaType: 'text/javascript',
       status: 204,
@@ -387,13 +494,13 @@ describe('resolveWebBundle', () => {
       { length: 6 },
       (_, index) => `https://app.example/assets/concurrent-${index}.png`
     );
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: `<!doctype html>${assetUrls.map((url) => `<img src="${url}">`).join('')}`,
       etag: '"entry-concurrent"',
       mediaType: 'text/html',
     });
     for (const url of assetUrls) {
-      native.responses.set(url, {
+      storage.responses.set(url, {
         body: new Uint8Array([1]),
         etag: `"${url}"`,
         mediaType: 'image/png',
@@ -493,7 +600,7 @@ describe('resolveWebBundle', () => {
         return cacheAdapter.hashFile(path, algorithms);
       },
     };
-    native.responses.set(ENTRY, { error: new Error('offline') });
+    storage.responses.set(ENTRY, { error: new Error('offline') });
 
     const fallback = await resolveWebBundleWithAdapter({
       cacheAdapter: observedAdapter,
@@ -510,8 +617,8 @@ describe('resolveWebBundle', () => {
     const good = await resolveWebBundle({ virtualUrl: ENTRY });
     serve('two');
     const corrupt = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.files.set(corrupt.sourcePath, encoder.encode('corrupt active generation'));
-    native.responses.set(ENTRY, { error: new Error('offline') });
+    storage.files.set(corrupt.sourcePath, encoder.encode('corrupt active generation'));
+    storage.responses.set(ENTRY, { error: new Error('offline') });
 
     const fallback = await resolveWebBundle({
       cachePolicy: { maxGenerations: 1 },
@@ -520,8 +627,8 @@ describe('resolveWebBundle', () => {
     });
 
     expect(fallback.generationId).toBe(good.generationId);
-    expect(native.files.has(good.sourcePath)).toBe(true);
-    expect(native.files.has(corrupt.sourcePath)).toBe(false);
+    expect(storage.files.has(good.sourcePath)).toBe(true);
+    expect(storage.files.has(corrupt.sourcePath)).toBe(false);
   });
 
   it('uses only a verified generation within the current byte policy after a forced refresh fails', async () => {
@@ -529,7 +636,7 @@ describe('resolveWebBundle', () => {
     serve('x'.repeat(2048));
     const oversized = await resolveWebBundle({ virtualUrl: ENTRY });
     expect(oversized.totalBytes).toBeGreaterThan(smaller.totalBytes);
-    native.responses.set(ENTRY, { error: new Error('offline') });
+    storage.responses.set(ENTRY, { error: new Error('offline') });
 
     const fallback = await resolveWebBundle({
       cachePolicy: { maxBytes: oversized.totalBytes - 1 },
@@ -539,7 +646,7 @@ describe('resolveWebBundle', () => {
 
     expect(fallback.generationId).toBe(smaller.generationId);
     expect(fallback.totalBytes).toBeLessThanOrEqual(oversized.totalBytes - 1);
-    expect(native.files.has(oversized.sourcePath)).toBe(false);
+    expect(storage.files.has(oversized.sourcePath)).toBe(false);
   });
 
   it('publishes a stricter generation limit after a forced refresh fails', async () => {
@@ -548,7 +655,7 @@ describe('resolveWebBundle', () => {
     const second = await resolveWebBundle({ virtualUrl: ENTRY });
     serve('three');
     const active = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.set(ENTRY, { error: new Error('offline') });
+    storage.responses.set(ENTRY, { error: new Error('offline') });
 
     const fallback = await resolveWebBundle({
       cachePolicy: { maxGenerations: 1 },
@@ -560,7 +667,7 @@ describe('resolveWebBundle', () => {
     await expect(readMirroredWebBundle(first.sourcePath)).rejects.toThrow('Missing file');
     await expect(readMirroredWebBundle(second.sourcePath)).rejects.toThrow('Missing file');
     const state = JSON.parse(
-      decoder.decode(native.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.json`)!)
+      decoder.decode(storage.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.json`)!)
     ) as { generations: Array<{ generationId: string }> };
     expect(state.generations.map(({ generationId }) => generationId)).toEqual([
       active.generationId,
@@ -571,8 +678,8 @@ describe('resolveWebBundle', () => {
     await resolveWebBundle({ virtualUrl: ENTRY });
     const cacheDirectory = cacheDirectoryForOrigin(ENTRY);
     const orphanDirectory = `${cacheDirectory}/generations/orphan`;
-    native.directories.add(orphanDirectory);
-    native.files.set(`${orphanDirectory}/large.data`, new Uint8Array(1024));
+    storage.directories.add(orphanDirectory);
+    storage.files.set(`${orphanDirectory}/large.data`, new Uint8Array(1024));
     serve('two');
 
     await resolveWebBundle({
@@ -580,8 +687,8 @@ describe('resolveWebBundle', () => {
       virtualUrl: ENTRY,
     });
 
-    expect(native.files.has(`${orphanDirectory}/large.data`)).toBe(false);
-    expect(native.directories.has(orphanDirectory)).toBe(false);
+    expect(storage.files.has(`${orphanDirectory}/large.data`)).toBe(false);
+    expect(storage.directories.has(orphanDirectory)).toBe(false);
   });
 
   it('requests identity transfer encoding without dropping conditional headers', async () => {
@@ -626,7 +733,7 @@ describe('resolveWebBundle', () => {
       documentUrl?: string;
       entryUrl?: string;
     };
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     const secondUrl = `${ENTRY}#/books/99`;
     const second = await resolveWebBundle({ virtualUrl: secondUrl });
@@ -643,13 +750,13 @@ describe('resolveWebBundle', () => {
       documentUrl: ENTRY,
       entryUrl: ENTRY,
     });
-    expect(native.requests).toEqual(
+    expect(storage.requests).toEqual(
       expect.arrayContaining([
         { etag: '"entry-1"', url: ENTRY },
         { etag: '"script-one"', url: SCRIPT },
       ])
     );
-    expect(native.requests.every((request) => !request.url.includes('#'))).toBe(true);
+    expect(storage.requests.every((request) => !request.url.includes('#'))).toBe(true);
   });
 
   it.each([
@@ -668,22 +775,22 @@ describe('resolveWebBundle', () => {
   ])('$name', async ({ expectedFirst, expectedSecond, firstLocation }) => {
     const intermediateUrl = 'https://app.example/intermediate';
     const documentUrl = 'https://app.example/releases/index.html';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: firstLocation,
       status: 302,
     });
-    native.responses.set(intermediateUrl, {
+    storage.responses.set(intermediateUrl, {
       location: '/releases/index.html',
       status: 302,
     });
-    native.responses.set(documentUrl, {
+    storage.responses.set(documentUrl, {
       body: '<!doctype html><html><head></head><body>redirected</body></html>',
       etag: '"redirected-entry"',
       mediaType: 'text/html',
     });
 
     const first = await resolveWebBundle({ virtualUrl: `${ENTRY}#/books/42` });
-    native.requests.length = 0;
+    storage.requests.length = 0;
     const second = await resolveWebBundle({ virtualUrl: `${ENTRY}#/books/99` });
 
     expect(first.baseUrl).toBe(expectedFirst);
@@ -692,35 +799,35 @@ describe('resolveWebBundle', () => {
       generationId: first.generationId,
       usedCachedBundle: true,
     });
-    expect(native.requests.every((request) => !request.url.includes('#'))).toBe(true);
+    expect(storage.requests.every((request) => !request.url.includes('#'))).toBe(true);
   });
 
   it('does not reuse a generation created for another entry on the same origin', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
     const secondEntry = 'https://app.example/admin/';
-    native.responses.set(secondEntry, {
+    storage.responses.set(secondEntry, {
       body: '<!doctype html><html><head></head><body>admin entry</body></html>',
       etag: '"admin-entry"',
       mediaType: 'text/html',
     });
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     const second = await resolveWebBundle({ virtualUrl: secondEntry });
 
     expect(second.generationId).not.toBe(first.generationId);
-    expect(native.requests.some((request) => request.url === secondEntry)).toBe(true);
+    expect(storage.requests.some((request) => request.url === secondEntry)).toBe(true);
     expect(await readMirroredWebBundle(second.sourcePath)).toContain('admin entry');
   });
 
   it('promotes the requested entry before maxGenerations pruning and keeps it available offline', async () => {
     const entryA = 'https://app.example/a/';
     const entryB = 'https://app.example/b/';
-    native.responses.set(entryA, {
+    storage.responses.set(entryA, {
       body: '<!doctype html><html><head></head><body>entry a</body></html>',
       etag: '"entry-a"',
       mediaType: 'text/html',
     });
-    native.responses.set(entryB, {
+    storage.responses.set(entryB, {
       body: '<!doctype html><html><head></head><body>entry b</body></html>',
       etag: '"entry-b"',
       mediaType: 'text/html',
@@ -733,7 +840,7 @@ describe('resolveWebBundle', () => {
       cachePolicy: { maxGenerations: 2 },
       virtualUrl: entryB,
     });
-    native.responses.set(entryA, { error: new Error('offline') });
+    storage.responses.set(entryA, { error: new Error('offline') });
 
     const offlineA = await resolveWebBundle({
       cachePolicy: { maxGenerations: 1 },
@@ -801,19 +908,19 @@ describe('resolveWebBundle', () => {
 
   it('refreshes when an asset ETag changes even if its bytes are identical', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.get(SCRIPT)!.etag = '"script-reissued"';
+    storage.responses.get(SCRIPT)!.etag = '"script-reissued"';
 
     const second = await resolveWebBundle({ virtualUrl: ENTRY });
 
     expect(second.generationId).not.toBe(first.generationId);
     expect(
-      native.requests.some((request) => request.url === SCRIPT && request.etag === '"script-one"')
+      storage.requests.some((request) => request.url === SCRIPT && request.etag === '"script-one"')
     ).toBe(true);
   });
 
   it('refreshes when a 304 response replaces the stored ETag validator', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.get(SCRIPT)!.etag = 'W/"script-one"';
+    storage.responses.get(SCRIPT)!.etag = 'W/"script-one"';
     const weakComparisonAdapter: LocalWebViewCacheAdapter = {
       ...cacheAdapter,
       async download(options) {
@@ -834,11 +941,11 @@ describe('resolveWebBundle', () => {
       cacheAdapter: weakComparisonAdapter,
       virtualUrl: ENTRY,
     });
-    native.requests.length = 0;
+    storage.requests.length = 0;
     await resolveWebBundle({ virtualUrl: ENTRY });
 
     expect(refreshed.generationId).not.toBe(first.generationId);
-    expect(native.requests).toContainEqual({
+    expect(storage.requests).toContainEqual({
       etag: 'W/"script-one"',
       url: SCRIPT,
     });
@@ -846,7 +953,7 @@ describe('resolveWebBundle', () => {
 
   it('refreshes after a proven change with sibling validators already in flight', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.get(ENTRY)!.etag = '"entry-reissued"';
+    storage.responses.get(ENTRY)!.etag = '"entry-reissued"';
     let siblingStarted = false;
     const cancellingAdapter: LocalWebViewCacheAdapter = {
       ...cacheAdapter,
@@ -869,17 +976,17 @@ describe('resolveWebBundle', () => {
   });
 
   it('persists an ETag that appears after the first download', async () => {
-    native.responses.get(SCRIPT)!.etag = undefined;
+    storage.responses.get(SCRIPT)!.etag = undefined;
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.get(SCRIPT)!.etag = '"script-now-versioned"';
+    storage.responses.get(SCRIPT)!.etag = '"script-now-versioned"';
 
     const refreshed = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.requests.length = 0;
+    storage.requests.length = 0;
     const reused = await resolveWebBundle({ virtualUrl: ENTRY });
 
     expect(refreshed.generationId).not.toBe(first.generationId);
     expect(reused.generationId).toBe(refreshed.generationId);
-    expect(native.requests).toContainEqual({
+    expect(storage.requests).toContainEqual({
       etag: '"script-now-versioned"',
       url: SCRIPT,
     });
@@ -887,7 +994,7 @@ describe('resolveWebBundle', () => {
 
   it('uses the last verified generation when revalidation is offline', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.set(ENTRY, { error: new Error('offline') });
+    storage.responses.set(ENTRY, { error: new Error('offline') });
 
     const second = await resolveWebBundle({ virtualUrl: ENTRY });
 
@@ -904,7 +1011,7 @@ describe('resolveWebBundle', () => {
       onCachedBundle: (bundle) => {
         observations.push({
           bundle: bundle?.generationId,
-          requests: native.requests.length,
+          requests: storage.requests.length,
         });
       },
       virtualUrl: ENTRY,
@@ -912,12 +1019,12 @@ describe('resolveWebBundle', () => {
 
     expect(observations).toEqual([{ bundle: undefined, requests: 0 }]);
 
-    native.requests.length = 0;
+    storage.requests.length = 0;
     await resolveWebBundle({
       onCachedBundle: (bundle) => {
         observations.push({
           bundle: bundle?.generationId,
-          requests: native.requests.length,
+          requests: storage.requests.length,
         });
       },
       virtualUrl: ENTRY,
@@ -945,7 +1052,7 @@ describe('resolveWebBundle', () => {
         return cacheAdapter.hashFile(path, algorithms);
       },
     };
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     await resolveWebBundleWithAdapter({
       cacheAdapter: observedAdapter,
@@ -953,7 +1060,7 @@ describe('resolveWebBundle', () => {
         observations.push({
           bundle: bundle?.generationId,
           hashes: cachedHashCalls,
-          requests: native.requests.length,
+          requests: storage.requests.length,
         });
       },
       virtualUrl: ENTRY,
@@ -971,7 +1078,7 @@ describe('resolveWebBundle', () => {
 
   it('does not publish a generation whose entry path is missing', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.files.delete(first.sourcePath);
+    storage.files.delete(first.sourcePath);
     const published: Array<string | undefined> = [];
 
     await resolveWebBundle({
@@ -1070,7 +1177,7 @@ describe('resolveWebBundle', () => {
       cachePolicy: { maxGenerations: 2 },
       virtualUrl: ENTRY,
     });
-    native.files.delete(active.sourcePath);
+    storage.files.delete(active.sourcePath);
 
     const rolledBack = await rollbackWebBundle(cacheDirectoryForOrigin(ENTRY), active.generationId);
 
@@ -1143,7 +1250,7 @@ describe('resolveWebBundle', () => {
     const firstEntry = 'https://app.example/first/';
     const secondEntry = 'https://app.example/second/';
     const cacheDirectory = '/documents/shared-entry-cache';
-    native.responses.set(firstEntry, {
+    storage.responses.set(firstEntry, {
       body: '<!doctype html><html><head></head><body>FIRST_ONE</body></html>',
       etag: '"first-one"',
       mediaType: 'text/html',
@@ -1153,7 +1260,7 @@ describe('resolveWebBundle', () => {
       cachePolicy: { maxGenerations: 4 },
       virtualUrl: firstEntry,
     });
-    native.responses.set(firstEntry, {
+    storage.responses.set(firstEntry, {
       body: '<!doctype html><html><head></head><body>FIRST_TWO</body></html>',
       etag: '"first-two"',
       mediaType: 'text/html',
@@ -1163,7 +1270,7 @@ describe('resolveWebBundle', () => {
       cachePolicy: { maxGenerations: 4 },
       virtualUrl: firstEntry,
     });
-    native.responses.set(secondEntry, {
+    storage.responses.set(secondEntry, {
       body: '<!doctype html><html><head></head><body>SECOND_ONE</body></html>',
       etag: '"second-one"',
       mediaType: 'text/html',
@@ -1207,10 +1314,10 @@ describe('resolveWebBundle', () => {
     ]);
 
     expect(second.generationId).toBe(first.generationId);
-    expect([...native.files.keys()].filter((path) => path.includes('/state.next-'))).toEqual([]);
+    expect([...storage.files.keys()].filter((path) => path.includes('/state.next-'))).toEqual([]);
   });
 
-  it('propagates cancellation into an active native download', async () => {
+  it('propagates cancellation into an active storage download', async () => {
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
@@ -1266,12 +1373,12 @@ describe('resolveWebBundle', () => {
 
     const cacheDirectory = cacheDirectoryForOrigin(ENTRY);
     expect(
-      [...native.files.keys()].filter((path) => path.startsWith(`${cacheDirectory}/generations/`))
+      [...storage.files.keys()].filter((path) => path.startsWith(`${cacheDirectory}/generations/`))
     ).toEqual([]);
     expect(
-      [...native.directories].filter((path) => path.startsWith(`${cacheDirectory}/generations/`))
+      [...storage.directories].filter((path) => path.startsWith(`${cacheDirectory}/generations/`))
     ).toEqual([]);
-    expect(native.files.has(`${cacheDirectory}/state.json`)).toBe(false);
+    expect(storage.files.has(`${cacheDirectory}/state.json`)).toBe(false);
   });
 
   it('keeps later cache operations queued when a lock waiter is cancelled', async () => {
@@ -1330,17 +1437,17 @@ describe('resolveWebBundle', () => {
     const cacheDirectory = cacheDirectoryForOrigin(ENTRY);
     const current = await resolveWebBundle({ virtualUrl: ENTRY });
     const orphanDirectory = `${cacheDirectory}/generations/orphan`;
-    native.directories.add(orphanDirectory);
-    native.files.set(`${orphanDirectory}/large.data`, new Uint8Array(1024));
-    native.files.set(`${cacheDirectory}/staging/interrupted.data`, new Uint8Array(1024));
-    native.files.set(`${cacheDirectory}/state.next-crash.json`, new TextEncoder().encode('{}'));
+    storage.directories.add(orphanDirectory);
+    storage.files.set(`${orphanDirectory}/large.data`, new Uint8Array(1024));
+    storage.files.set(`${cacheDirectory}/staging/interrupted.data`, new Uint8Array(1024));
+    storage.files.set(`${cacheDirectory}/state.next-crash.json`, new TextEncoder().encode('{}'));
 
     const reused = await resolveWebBundle({ virtualUrl: ENTRY });
 
     expect(reused.generationId).toBe(current.generationId);
-    expect(native.files.has(`${orphanDirectory}/large.data`)).toBe(false);
-    expect(native.files.has(`${cacheDirectory}/staging/interrupted.data`)).toBe(false);
-    expect(native.files.has(`${cacheDirectory}/state.next-crash.json`)).toBe(false);
+    expect(storage.files.has(`${orphanDirectory}/large.data`)).toBe(false);
+    expect(storage.files.has(`${cacheDirectory}/staging/interrupted.data`)).toBe(false);
+    expect(storage.files.has(`${cacheDirectory}/state.next-crash.json`)).toBe(false);
   });
 
   it('propagates a state read I/O error without deleting verified generations', async () => {
@@ -1364,7 +1471,7 @@ describe('resolveWebBundle', () => {
     ).rejects.toThrow('EIO while reading cache state');
 
     await expect(readMirroredWebBundle(current.sourcePath)).resolves.toContain('dataset.version');
-    expect(native.files.has(`${cacheDirectory}/state.json`)).toBe(true);
+    expect(storage.files.has(`${cacheDirectory}/state.json`)).toBe(true);
   });
 
   it('applies a stricter generation policy even when the active bundle is unchanged', async () => {
@@ -1393,7 +1500,7 @@ describe('resolveWebBundle', () => {
     await expect(readMirroredWebBundle(second.sourcePath)).rejects.toThrow('Missing file');
     const previousState = JSON.parse(
       new TextDecoder().decode(
-        native.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.previous.json`)!
+        storage.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.previous.json`)!
       )
     ) as { generations: Array<{ generationId: string }> };
     expect(previousState.generations.map(({ generationId }) => generationId)).toEqual([
@@ -1403,7 +1510,7 @@ describe('resolveWebBundle', () => {
 
   it('does not reuse an active generation after maxBytes is lowered below its size', async () => {
     const active = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     await expect(
       resolveWebBundle({
@@ -1412,7 +1519,7 @@ describe('resolveWebBundle', () => {
       })
     ).rejects.toThrow('maxBytes');
 
-    expect(native.requests.length).toBeGreaterThan(0);
+    expect(storage.requests.length).toBeGreaterThan(0);
     await expect(readMirroredWebBundle(active.sourcePath)).rejects.toThrow('Missing file');
   });
 
@@ -1467,11 +1574,11 @@ describe('resolveWebBundle', () => {
     const entryHtml =
       '<!doctype html><html><head><script src="/assets/app.js"></script></head></html>';
     const script = `globalThis.downloaded = ${JSON.stringify('x'.repeat(256))};`;
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: entryHtml,
       mediaType: 'text/html',
     });
-    native.responses.set(SCRIPT, {
+    storage.responses.set(SCRIPT, {
       body: script,
       mediaType: 'text/javascript',
     });
@@ -1485,8 +1592,8 @@ describe('resolveWebBundle', () => {
       })
     ).rejects.toThrow('maxBytes');
 
-    expect(native.requests.map((request) => request.url)).toEqual([ENTRY, SCRIPT]);
-    expect([...native.files.keys()].filter((path) => path.includes('/staging/download-'))).toEqual(
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY, SCRIPT]);
+    expect([...storage.files.keys()].filter((path) => path.includes('/staging/download-'))).toEqual(
       []
     );
   });
@@ -1510,11 +1617,11 @@ describe('resolveWebBundle', () => {
       const assetUrl = new URL(assetPath, ENTRY).toString();
       const marker = `🙂;/%${'한'.repeat(128)}`;
       const assetSource = source(marker);
-      native.responses.set(ENTRY, {
+      storage.responses.set(ENTRY, {
         body: entry,
         mediaType: 'text/html',
       });
-      native.responses.set(assetUrl, {
+      storage.responses.set(assetUrl, {
         body: assetSource,
         mediaType,
       });
@@ -1543,16 +1650,18 @@ describe('resolveWebBundle', () => {
       }
 
       expect(payloadEncodingCalls).toBe(0);
-      expect(native.files.has(`${cacheDirectory}/state.json`)).toBe(false);
+      expect(storage.files.has(`${cacheDirectory}/state.json`)).toBe(false);
       expect(
-        [...native.files.keys()].filter((path) => path.startsWith(`${cacheDirectory}/generations/`))
+        [...storage.files.keys()].filter((path) =>
+          path.startsWith(`${cacheDirectory}/generations/`)
+        )
       ).toEqual([]);
     }
   );
 
   it('rejects an oversized response before hashing or reading it into memory', async () => {
     const oversizedHtml = `<!doctype html><html><body>${'x'.repeat(1024)}</body></html>`;
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: oversizedHtml,
       mediaType: 'text/html',
     });
@@ -1586,37 +1695,37 @@ describe('resolveWebBundle', () => {
     expect(downloadLimits).toEqual([54]);
     expect(hashCalls).toBe(0);
     expect(readCalls).toBe(0);
-    expect([...native.files.keys()].filter((path) => path.includes('/staging/download-'))).toEqual(
+    expect([...storage.files.keys()].filter((path) => path.includes('/staging/download-'))).toEqual(
       []
     );
   });
 
   it.each([
-    ['bridge then inline', true],
-    ['inline then bridge', false],
+    ['file then inline', true],
+    ['inline then file', false],
   ] as const)(
-    'reuses one canonical download for %s delivery and preserves the bridge file',
-    async (_label, bridgeFirst) => {
+    'reuses one canonical download for %s delivery and preserves the local file',
+    async (_label, fileFirst) => {
       const assetUrl = 'https://app.example/assets/shared.wasm';
-      const bridge = '<link rel="preload" as="fetch" href="/assets/shared.wasm#bridge">';
+      const file = '<link rel="preload" as="fetch" href="/assets/shared.wasm#file">';
       const inline = '<img src="/assets/shared.wasm#inline">';
-      native.responses.set(ENTRY, {
-        body: `<!doctype html><html><head>${bridgeFirst ? bridge : ''}</head><body>${
-          bridgeFirst ? inline : `${inline}${bridge}`
+      storage.responses.set(ENTRY, {
+        body: `<!doctype html><html><head>${fileFirst ? file : ''}</head><body>${
+          fileFirst ? inline : `${inline}${file}`
         }</body></html>`,
         mediaType: 'text/html',
       });
-      native.responses.set(assetUrl, {
+      storage.responses.set(assetUrl, {
         body: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]),
         mediaType: 'application/wasm',
       });
 
       const bundle = await resolveWebBundle({ virtualUrl: `${ENTRY}#initial-route` });
-      const assetRequests = native.requests.filter((request) => request.url === assetUrl);
+      const assetRequests = storage.requests.filter((request) => request.url === assetUrl);
       const localAsset = bundle.localAssets[assetUrl];
 
       expect(assetRequests).toHaveLength(1);
-      expect(native.requests.some((request) => request.url.includes('#'))).toBe(false);
+      expect(storage.requests.some((request) => request.url.includes('#'))).toBe(false);
       expect(bundle.downloadedAssets).toContain(assetUrl);
       expect(bundle.downloadedAssets.some((url) => url.includes('#'))).toBe(false);
       expect(Object.keys(bundle.localAssets)).toEqual([assetUrl]);
@@ -1624,7 +1733,7 @@ describe('resolveWebBundle', () => {
       expect(localAsset?.integrity.sha256).toBeTruthy();
       expect(localAsset?.integrity.sha384).toBeTruthy();
       expect(localAsset?.integrity.sha512).toBeTruthy();
-      expect(native.files.get(localAsset!.path)).toEqual(
+      expect(storage.files.get(localAsset!.path)).toEqual(
         new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])
       );
       expect(await readMirroredWebBundle(bundle.sourcePath)).toContain(
@@ -1633,16 +1742,16 @@ describe('resolveWebBundle', () => {
     }
   );
 
-  it('rejects an inline asset when a custom cache adapter corrupts its promoted bridge file', async () => {
+  it('rejects an inline asset when a custom cache adapter corrupts its promoted local file', async () => {
     const assetUrl = 'https://app.example/assets/shared.wasm';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: `<!doctype html><html><body>
         <img src="/assets/shared.wasm">
         <link rel="preload" as="fetch" href="/assets/shared.wasm">
       </body></html>`,
       mediaType: 'text/html',
     });
-    native.responses.set(assetUrl, {
+    storage.responses.set(assetUrl, {
       body: new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]),
       mediaType: 'application/wasm',
     });
@@ -1662,11 +1771,11 @@ describe('resolveWebBundle', () => {
         cacheAdapter: corruptingAdapter,
         virtualUrl: ENTRY,
       })
-    ).rejects.toThrow('Promoted bridge asset failed integrity verification');
+    ).rejects.toThrow('Promoted file asset failed integrity verification');
 
-    expect(native.requests.filter((request) => request.url === assetUrl)).toHaveLength(1);
+    expect(storage.requests.filter((request) => request.url === assetUrl)).toHaveLength(1);
     expect(
-      [...native.files.keys()].filter((path) => path.startsWith('/temporary/local-webview-'))
+      [...storage.files.keys()].filter((path) => path.startsWith('/temporary/local-webview-'))
     ).toEqual([]);
   });
 
@@ -1686,6 +1795,12 @@ describe('resolveWebBundle', () => {
         virtualUrl: ENTRY,
       })
     ).rejects.toThrow('public HTTPS host');
+    await expect(
+      resolveWebBundle({
+        validationMode: 'unknown' as never,
+        virtualUrl: ENTRY,
+      })
+    ).rejects.toThrow('validationMode');
   });
 
   it.each([
@@ -1701,7 +1816,7 @@ describe('resolveWebBundle', () => {
     'https://[2001:db8::1]/',
   ])('rejects the non-public host %s before downloading', async (virtualUrl) => {
     await expect(resolveWebBundle({ virtualUrl })).rejects.toThrow('public HTTPS host');
-    expect(native.requests).toEqual([]);
+    expect(storage.requests).toEqual([]);
   });
 
   it.each([
@@ -1722,8 +1837,8 @@ describe('resolveWebBundle', () => {
       })
     ).rejects.toThrow('safe integers');
 
-    expect(native.requests).toEqual([]);
-    expect(native.files.size).toBe(0);
+    expect(storage.requests).toEqual([]);
+    expect(storage.files.size).toBe(0);
   });
 
   it('rejects a large data-URL resource before duplicating it into the localized HTML', async () => {
@@ -1736,11 +1851,11 @@ describe('resolveWebBundle', () => {
         return cacheAdapter.download(options);
       },
     };
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: '<!doctype html><video src="/assets/movie.mp4"></video>',
       mediaType: 'text/html',
     });
-    native.responses.set(mediaUrl, {
+    storage.responses.set(mediaUrl, {
       body: new Uint8Array(1024),
       mediaType: 'video/mp4',
     });
@@ -1754,17 +1869,17 @@ describe('resolveWebBundle', () => {
     ).rejects.toThrow('maxInlineBytes=256');
 
     expect(mediaDownloadLimit).toBe(256);
-    expect(native.requests.map((request) => request.url)).toEqual([ENTRY, mediaUrl]);
-    expect([...native.files.keys()].some((path) => path.includes('/generations/'))).toBe(false);
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY, mediaUrl]);
+    expect([...storage.files.keys()].some((path) => path.includes('/generations/'))).toBe(false);
   });
 
   it('does not reuse a generation created under a larger maxInlineBytes policy', async () => {
     const mediaUrl = 'https://app.example/assets/poster.png';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: '<!doctype html><img src="/assets/poster.png">',
       mediaType: 'text/html',
     });
-    native.responses.set(mediaUrl, {
+    storage.responses.set(mediaUrl, {
       body: new Uint8Array(1024),
       mediaType: 'image/png',
     });
@@ -1772,7 +1887,7 @@ describe('resolveWebBundle', () => {
       cachePolicy: { maxInlineBytes: 2048 },
       virtualUrl: ENTRY,
     });
-    native.requests.length = 0;
+    storage.requests.length = 0;
 
     await expect(
       resolveWebBundle({
@@ -1781,18 +1896,18 @@ describe('resolveWebBundle', () => {
       })
     ).rejects.toThrow('maxInlineBytes=128');
 
-    expect(native.requests.map((request) => request.url)).toEqual([ENTRY, mediaUrl]);
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY, mediaUrl]);
   });
 
   it('enforces maxInlineBytes when a previously streamed asset is promoted inline', async () => {
     const sharedUrl = 'https://app.example/assets/shared.wasm';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: `<!doctype html>
         <link rel="preload" as="fetch" href="/assets/shared.wasm">
         <img src="/assets/shared.wasm">`,
       mediaType: 'text/html',
     });
-    native.responses.set(sharedUrl, {
+    storage.responses.set(sharedUrl, {
       body: new Uint8Array(1024),
       mediaType: 'application/wasm',
     });
@@ -1804,16 +1919,16 @@ describe('resolveWebBundle', () => {
       })
     ).rejects.toThrow('maxInlineBytes=256');
 
-    expect(native.requests.filter((request) => request.url === sharedUrl)).toHaveLength(1);
+    expect(storage.requests.filter((request) => request.url === sharedUrl)).toHaveLength(1);
   });
 
-  it('follows only validated redirects with native auto-follow disabled', async () => {
+  it('follows only validated redirects with storage auto-follow disabled', async () => {
     const redirectedEntry = 'https://app.example/index.html';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: '/index.html',
       status: 302,
     });
-    native.responses.set(redirectedEntry, {
+    storage.responses.set(redirectedEntry, {
       body: '<!doctype html><script type="module" src="/assets/app.js"></script>',
       etag: '"entry-redirected"',
       mediaType: 'text/html',
@@ -1821,11 +1936,11 @@ describe('resolveWebBundle', () => {
 
     await resolveWebBundle({ virtualUrl: ENTRY });
 
-    expect(native.requests.slice(0, 2)).toEqual([
+    expect(storage.requests.slice(0, 2)).toEqual([
       { etag: undefined, url: ENTRY },
       { etag: undefined, url: redirectedEntry },
     ]);
-    expect(native.blobConfigs.every((config) => config.followRedirect === false)).toBe(true);
+    expect(storage.downloadOptions.every((config) => config.followRedirect === false)).toBe(true);
   });
 
   it('uses final response URLs to resolve redirected entry and module dependencies', async () => {
@@ -1833,23 +1948,23 @@ describe('resolveWebBundle', () => {
     const moduleStart = 'https://app.example/releases/v2/start.js';
     const moduleUrl = 'https://app.example/assets/v2/app.js';
     const chunkUrl = 'https://app.example/assets/v2/chunk.js';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: documentUrl,
       status: 302,
     });
-    native.responses.set(documentUrl, {
+    storage.responses.set(documentUrl, {
       body: '<!doctype html><script type="module" src="./start.js"></script>',
       mediaType: 'text/html',
     });
-    native.responses.set(moduleStart, {
+    storage.responses.set(moduleStart, {
       location: moduleUrl,
       status: 302,
     });
-    native.responses.set(moduleUrl, {
+    storage.responses.set(moduleUrl, {
       body: 'import "./chunk.js";',
       mediaType: 'text/javascript',
     });
-    native.responses.set(chunkUrl, {
+    storage.responses.set(chunkUrl, {
       body: 'export const ready = true;',
       mediaType: 'text/javascript',
     });
@@ -1857,17 +1972,17 @@ describe('resolveWebBundle', () => {
     const bundle = await resolveWebBundle({ virtualUrl: ENTRY });
 
     expect(bundle.baseUrl).toBe(documentUrl);
-    expect(native.requests.map((request) => request.url)).toEqual(
+    expect(storage.requests.map((request) => request.url)).toEqual(
       expect.arrayContaining([documentUrl, moduleStart, moduleUrl, chunkUrl])
     );
-    expect(native.requests.some((request) => request.url === 'https://app.example/chunk.js')).toBe(
+    expect(storage.requests.some((request) => request.url === 'https://app.example/chunk.js')).toBe(
       false
     );
   });
 
   it('does not grant the entry origin to HTML redirected to a trusted CDN', async () => {
     const cdnEntry = 'https://cdn.example/maintenance.html';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: cdnEntry,
       status: 302,
     });
@@ -1878,7 +1993,7 @@ describe('resolveWebBundle', () => {
         virtualUrl: ENTRY,
       })
     ).rejects.toThrow('Entry redirect target changes origin');
-    expect(native.requests.map((request) => request.url)).toEqual([ENTRY]);
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY]);
   });
 
   it.each([
@@ -1886,7 +2001,7 @@ describe('resolveWebBundle', () => {
     ['HTTPS downgrade', 'http://app.example/entry.html'],
     ['private network', 'https://127.0.0.1/entry.html'],
   ])('rejects a %s redirect before requesting its target', async (_name, target) => {
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: target,
       status: 302,
     });
@@ -1895,48 +2010,48 @@ describe('resolveWebBundle', () => {
       /untrusted origin|absolute HTTPS|public HTTPS host/
     );
 
-    expect(native.requests.map((request) => request.url)).toEqual([ENTRY]);
+    expect(storage.requests.map((request) => request.url)).toEqual([ENTRY]);
   });
 
   it('rejects redirect loops and bounded overlong chains', async () => {
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       location: '/loop',
       status: 302,
     });
-    native.responses.set('https://app.example/loop', {
+    storage.responses.set('https://app.example/loop', {
       location: '/',
       status: 302,
     });
 
     await expect(resolveWebBundle({ virtualUrl: ENTRY })).rejects.toThrow('Redirect loop');
 
-    native.requests.length = 0;
+    storage.requests.length = 0;
     for (let index = 0; index <= 10; index += 1) {
-      native.responses.set(index === 0 ? ENTRY : `https://app.example/redirect-${index}`, {
+      storage.responses.set(index === 0 ? ENTRY : `https://app.example/redirect-${index}`, {
         location: `/redirect-${index + 1}`,
         status: 302,
       });
     }
     await expect(resolveWebBundle({ virtualUrl: ENTRY })).rejects.toThrow('Too many redirects');
-    expect(native.requests).toHaveLength(11);
+    expect(storage.requests).toHaveLength(11);
   });
 
   it('keeps cross-origin references remote unless their origin is explicitly trusted', async () => {
     const cdn = 'https://cdn.example/app.js';
     const cdnBinary = 'https://cdn.example/game.wasm';
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: `<!doctype html>
         <link rel="preload" href="${cdnBinary}" as="fetch" type="application/wasm">
         <script type="module" src="${cdn}"></script>`,
       etag: '"cross-origin-entry"',
       mediaType: 'text/html',
     });
-    native.responses.set(cdn, {
+    storage.responses.set(cdn, {
       body: 'export const ready = true;',
       etag: '"cdn-script"',
       mediaType: 'text/javascript',
     });
-    native.responses.set(cdnBinary, {
+    storage.responses.set(cdnBinary, {
       body: 'wasm-bytes',
       etag: '"cdn-wasm"',
       headers: {
@@ -1948,17 +2063,17 @@ describe('resolveWebBundle', () => {
     });
 
     const defaultBundle = await resolveWebBundle({ virtualUrl: ENTRY });
-    expect(native.requests.some((request) => request.url === cdn)).toBe(false);
+    expect(storage.requests.some((request) => request.url === cdn)).toBe(false);
     expect(await readMirroredWebBundle(defaultBundle.sourcePath)).toContain(`src="${cdn}"`);
 
-    native.requests.length = 0;
+    storage.requests.length = 0;
     const trustedBundle = await resolveWebBundle({
       trustedAssetOrigins: ['https://cdn.example'],
       virtualUrl: ENTRY,
     });
-    expect(native.requests.some((request) => request.url === cdn)).toBe(true);
+    expect(storage.requests.some((request) => request.url === cdn)).toBe(true);
     expect(
-      native.requests
+      storage.requests
         .filter((request) => request.url === cdn || request.url === cdnBinary)
         .map((request) => request.origin)
     ).toEqual(['https://app.example', 'https://app.example']);
@@ -1971,7 +2086,7 @@ describe('resolveWebBundle', () => {
   });
 
   it('requires explicit CSP removal for both HTTP headers and meta tags', async () => {
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: `<!doctype html><html><head>
         <meta http-equiv="Content-Security-Policy" content="script-src 'self'">
       </head><body></body></html>`,
@@ -2004,7 +2119,7 @@ describe('resolveWebBundle', () => {
     const second = await resolveWebBundle({ virtualUrl: ENTRY });
     serve('three');
     const active = await resolveWebBundle({ virtualUrl: ENTRY });
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: '<!doctype html><html><body>blocked refresh</body></html>',
       headers: {
         'Content-Security-Policy': "default-src 'self'",
@@ -2026,7 +2141,7 @@ describe('resolveWebBundle', () => {
       'document.body.dataset.version'
     );
     const state = JSON.parse(
-      decoder.decode(native.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.json`)!)
+      decoder.decode(storage.files.get(`${cacheDirectoryForOrigin(ENTRY)}/state.json`)!)
     ) as { generations: Array<{ generationId: string }> };
     expect(state.generations.map(({ generationId }) => generationId)).toEqual([
       active.generationId,
@@ -2035,7 +2150,7 @@ describe('resolveWebBundle', () => {
 
   it('records and revalidates a report-only CSP only under the explicit bypass', async () => {
     const reportOnly = (endpoint: string) => `default-src 'self'; report-to ${endpoint}`;
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: '<!doctype html><html><body>report only</body></html>',
       etag: '"entry-report-only"',
       headers: {
@@ -2064,7 +2179,7 @@ describe('resolveWebBundle', () => {
         ?.contentSecurityPolicyReportOnly
     ).toBe(reportOnly('first'));
 
-    native.responses.get(ENTRY)!.headers = {
+    storage.responses.get(ENTRY)!.headers = {
       'Content-Security-Policy-Report-Only': reportOnly('second'),
     };
     const second = await resolveWebBundle({
@@ -2076,7 +2191,7 @@ describe('resolveWebBundle', () => {
   });
 
   it('does not reinterpret a non-HTML entry response as executable HTML', async () => {
-    native.responses.set(ENTRY, {
+    storage.responses.set(ENTRY, {
       body: '<script>globalThis.shouldNotRun = true</script>',
       mediaType: 'text/plain',
     });
@@ -2086,8 +2201,8 @@ describe('resolveWebBundle', () => {
     );
   });
 
-  it('rejects encoded native responses instead of serving compressed bytes as WASM', async () => {
-    native.responses.set(SCRIPT, {
+  it('rejects encoded storage responses instead of serving compressed bytes as WASM', async () => {
+    storage.responses.set(SCRIPT, {
       body: new Uint8Array([11, 29, 0, 0]),
       headers: { 'Content-Encoding': 'br' },
       mediaType: 'application/wasm',
@@ -2099,7 +2214,7 @@ describe('resolveWebBundle', () => {
   });
 
   it('does not let URL extension inference override a server-declared script MIME type', async () => {
-    native.responses.set(SCRIPT, {
+    storage.responses.set(SCRIPT, {
       body: 'globalThis.injected = true;',
       mediaType: 'text/plain',
     });
@@ -2109,19 +2224,19 @@ describe('resolveWebBundle', () => {
     );
   });
 
-  it('preserves final response metadata for a redirected bridge asset', async () => {
+  it('preserves final response metadata for a redirected file asset', async () => {
     const entryUrl = 'https://redirect-assets.example/play/';
     const assetUrl = `${entryUrl}Build/game.data`;
     const responseUrl = `${entryUrl}releases/v2/game.data`;
     const html =
       '<!doctype html><canvas></canvas><script>const config={dataUrl:"Build/game.data"}</script>';
     const bytes = new Uint8Array([1, 2, 3, 4]);
-    native.responses.set(entryUrl, { body: html, mediaType: 'text/html' });
-    native.responses.set(assetUrl, {
+    storage.responses.set(entryUrl, { body: html, mediaType: 'text/html' });
+    storage.responses.set(assetUrl, {
       location: responseUrl,
       status: 302,
     });
-    native.responses.set(responseUrl, {
+    storage.responses.set(responseUrl, {
       body: bytes,
       mediaType: 'application/octet-stream',
     });
@@ -2162,7 +2277,7 @@ describe('resolveWebBundle', () => {
 
     for (const [relativeUrl, body] of Object.entries(assets)) {
       const url = new URL(relativeUrl, entryUrl).toString();
-      native.responses.set(url, {
+      storage.responses.set(url, {
         body,
         etag: `"${new URL(url).pathname}"`,
         mediaType: url.endsWith('.wasm')
@@ -2182,7 +2297,7 @@ describe('resolveWebBundle', () => {
     );
     expect(Object.keys(bundle.localAssets).sort()).toEqual(streamableUrls.sort());
     for (const asset of Object.values(bundle.localAssets)) {
-      expect(native.files.get(asset.path)?.byteLength).toBe(asset.size);
+      expect(storage.files.get(asset.path)?.byteLength).toBe(asset.size);
       expect(asset.path).toContain(`/generations/${bundle.generationId}/assets/`);
       expect(asset.integrity.sha256).toBeTruthy();
       expect(asset.integrity.sha384).toBeTruthy();
@@ -2200,18 +2315,18 @@ describe('resolveWebBundle', () => {
     expect(localized).not.toContain('data:text/javascript;base64,');
     expect(localized).not.toContain('data:application/wasm;base64,');
     expect(
-      native.copies.filter(({ destination }) =>
+      storage.copies.filter(({ destination }) =>
         destination.includes(`/generations/${bundle.generationId}/assets/`)
       )
     ).toEqual([]);
-    const assetMoves = native.moves.filter(({ destination }) =>
+    const assetMoves = storage.moves.filter(({ destination }) =>
       destination.includes(`/generations/${bundle.generationId}/assets/`)
     );
     expect(assetMoves).toHaveLength(
       new Set(Object.values(bundle.localAssets).map((asset) => asset.sha256)).size
     );
     expect(
-      [...native.files.keys()].filter((path) => path.startsWith('/temporary/local-webview-'))
+      [...storage.files.keys()].filter((path) => path.startsWith('/temporary/local-webview-'))
     ).toEqual([]);
   });
 });

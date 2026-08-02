@@ -1,11 +1,12 @@
 {
-  "uiViewClassName": "NativeLocalWebView",
+  "uiViewClassName": "LocalWebView",
   "supportsRawText": false,
   "bubblingEventTypes": {},
   "directEventTypes": {},
   "validAttributes": {
     "assetsJson": true,
     "baseUrl": true,
+    "cacheRequestJson": true,
     "configurationJson": true,
     "documentId": true,
     "html": true,

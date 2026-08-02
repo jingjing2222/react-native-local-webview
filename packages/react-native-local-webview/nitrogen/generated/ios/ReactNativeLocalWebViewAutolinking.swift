@@ -12,20 +12,20 @@ import NitroModules
 public final class ReactNativeLocalWebViewAutolinking {
   public typealias bridge = margelo.nitro.localwebview.bridge.swift
 
-  public static func createNativeLocalWebView() -> bridge.std__shared_ptr_HybridNativeLocalWebViewSpec_ {
-    let hybridObject = HybridLocalWebView()
-    return { () -> bridge.std__shared_ptr_HybridNativeLocalWebViewSpec_ in
+  public static func createLocalWebView() -> bridge.std__shared_ptr_HybridLocalWebViewSpec_ {
+    let hybridObject = LocalWebView()
+    return { () -> bridge.std__shared_ptr_HybridLocalWebViewSpec_ in
       let __cxxWrapped = hybridObject.getCxxWrapper()
       return __cxxWrapped.getCxxPart()
     }()
   }
 
-  public static func isNativeLocalWebViewRecyclable() -> Bool {
-    return HybridLocalWebView.self is any RecyclableView.Type
+  public static func isLocalWebViewRecyclable() -> Bool {
+    return LocalWebView.self is any RecyclableView.Type
   }
 
   public static func createLocalWebViewCache() -> bridge.std__shared_ptr_HybridLocalWebViewCacheSpec_ {
-    let hybridObject = HybridLocalWebViewCache()
+    let hybridObject = LocalWebViewCache()
     return { () -> bridge.std__shared_ptr_HybridLocalWebViewCacheSpec_ in
       let __cxxWrapped = hybridObject.getCxxWrapper()
       return __cxxWrapped.getCxxPart()
@@ -33,6 +33,6 @@ public final class ReactNativeLocalWebViewAutolinking {
   }
 
   public static func isLocalWebViewCacheRecyclable() -> Bool {
-    return HybridLocalWebViewCache.self is any RecyclableView.Type
+    return LocalWebViewCache.self is any RecyclableView.Type
   }
 }
