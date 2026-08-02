@@ -85,6 +85,31 @@ The iOS runtime uses private WebKit HTTPS protocol-registration SPI. These E2E
 results establish technical behavior on the tested simulator, not App Store
 eligibility.
 
+## Latest warm-start smoke results
+
+These sequential Release runs use the 50 MiB Unity graph and the 100-resource
+fixture. They are single emulator/simulator observations, not statistically
+stable device claims.
+
+| Runtime                 | Direct 50 MiB warm | Local 50 MiB warm | Local offline | Direct 100 warm | Local 100 warm |
+| ----------------------- | -----------------: | ----------------: | ------------: | --------------: | -------------: |
+| Android latest          |             1.94 s |            0.56 s |        0.54 s |         0.096 s |        0.067 s |
+| Android low-end         |             6.68 s |            0.54 s |        0.48 s |         0.171 s |        0.037 s |
+| iPhone 17 Pro simulator |             0.62 s |            1.06 s |        0.80 s |         0.329 s |        0.481 s |
+
+Every local warm result transferred zero response-body bytes and used one
+release-ETag `304`; direct WebViews issued their normal per-resource cache
+requests. The local path is deliberately not presented as a universal latency
+win: hot WebKit caching was faster on this iOS smoke run. Its guaranteed benefit
+is an app-owned complete generation that still starts when the origin is
+unreachable.
+
+The cost is front-loaded. On Android latest, the first 50 MiB page took 8.29 s
+local versus 3.55 s direct because the visible page and background durable copy
+download concurrently, and peak PSS was 225.6 MiB versus 123.4 MiB. Android
+low-end peak PSS was 215.5 MiB local versus 116.6 MiB direct. The iOS local run
+peaked at 1,203 MiB combined app/WebKit RSS versus 1,108 MiB direct.
+
 ## Measured iOS simulator run
 
 This is one sequential Release run of the warm-start fast path on an iPhone 17
@@ -103,7 +128,8 @@ Its first install used about twice the network bytes because the visible WebView
 and the background durable mirror each downloaded the graph.
 
 The run's peak app-host/WebKit/combined RSS was 585/1,047/1,623 MiB for the local
-runtime versus 260/1,046/1,271 MiB for direct WebView. Those measurements predate
-single-request release validation; rerun `/e2e` before using background validation
-latency as a production budget. Use repeated physical-device runs before setting
-production latency or memory budgets.
+runtime versus 260/1,046/1,271 MiB for direct WebView. Those full-matrix
+measurements predate single-request release validation. Use the smoke results
+above for the current 50 MiB path, and rerun `/e2e` before using either run as a
+production budget. Use repeated physical-device runs before setting production
+latency or memory budgets.

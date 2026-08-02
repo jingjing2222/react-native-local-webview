@@ -108,6 +108,14 @@ The last complete generation starts from local storage. A release check happens
 behind the visible page. A changed release is installed atomically and becomes
 available on the next mount.
 
+For `release-etag` generations, parser-bound resources such as JavaScript, CSS,
+and bounded images are stored only inside the localized `index.html`. The warm
+path streams that document directly into the platform WebView; it does not copy
+the HTML or asset inventory through React state. A separate `assets` directory
+is created only when the graph contains resources that must remain files, such
+as large Unity data, WASM, Range responses, or statically discovered runtime
+fetches.
+
 ### Offline visit
 
 The last complete generation starts without waiting for the network. A failed

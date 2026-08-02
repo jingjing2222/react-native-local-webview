@@ -1690,7 +1690,19 @@ async function commitGeneration(
     localFiles.set(asset.sha256, `assets/${asset.sha256}`);
   }
   const createdAt = new Date().toISOString();
-  const remoteAssets = prepared.remoteAssets.map((asset) =>
+  // A release-wide ETag makes per-inline-resource revalidation metadata
+  // redundant. Keep only the entry (needed for the conditional request) and
+  // resources that must remain addressable as files at runtime. The localized
+  // HTML already owns every other resource, so a warm mount can parse a much
+  // smaller manifest before opening it.
+  const manifestAssets = prepared.bundleEtag
+    ? prepared.remoteAssets.filter(
+        (asset) =>
+          asset.delivery === 'file' ||
+          canonicalResourceUrl(asset.url) === canonicalResourceUrl(entryUrl)
+      )
+    : prepared.remoteAssets;
+  const remoteAssets = manifestAssets.map((asset) =>
     metadataForAsset(asset, asset.delivery === 'file' ? localFiles.get(asset.sha256) : undefined)
   );
   const manifestForSize = (totalBytes: number): GenerationManifest => ({
@@ -1734,7 +1746,7 @@ async function commitGeneration(
 
   try {
     await mkdir(cacheAdapter, generationDirectory);
-    await mkdir(cacheAdapter, `${generationDirectory}/assets`);
+    if (fileAssets.length > 0) await mkdir(cacheAdapter, `${generationDirectory}/assets`);
     for (const asset of fileAssets) {
       throwIfAborted(signal);
       const localFile = localFiles.get(asset.sha256)!;

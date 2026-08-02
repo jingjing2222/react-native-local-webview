@@ -207,10 +207,23 @@ The repository benchmark compares direct HTTPS loading with local delivery for
 50 MiB, 200 MiB, and 500 MiB Unity graphs, offline starts, 100–1,000-resource
 release checks, Range fetches, workers, WASM, cookies, CSP, and memory use.
 
-In the latest 50 MiB iOS simulator smoke run, the local path reached page-ready
-in 1.08 s on a warm start, completed its single `304` release check in 0.52 s,
-and reached page-ready in 0.78 s while fully offline. These are simulator smoke
-measurements, not physical-device production guarantees.
+The latest Release smoke runs measured the 50 MiB graph as follows. Each warm
+local start served zero network response-body bytes and performed one release
+`304` behind the visible page.
+
+| Runtime                 | Direct warm | Local warm | Local offline |
+| ----------------------- | ----------: | ---------: | ------------: |
+| Android latest          |      1.94 s |     0.56 s |        0.54 s |
+| Android low-end         |      6.68 s |     0.54 s |        0.48 s |
+| iPhone 17 Pro simulator |      0.62 s |     1.06 s |        0.80 s |
+
+Local delivery is not universally faster than a hot HTTP cache: the tested iOS
+simulator favored direct WebKit caching for this graph. The durable path trades
+additional first-install traffic, storage, and host memory for deterministic
+offline availability. On the latest Android profile, for example, the local
+first page took 8.29 s versus 3.55 s direct and peak PSS was 225.6 MiB versus
+123.4 MiB. These are single-run emulator and simulator measurements, not
+physical-device production guarantees.
 
 See the [package guide](./packages/react-native-local-webview/README.md) for the
 complete usage reference, [E2E guide](./e2e/README.md) for benchmark mechanics,

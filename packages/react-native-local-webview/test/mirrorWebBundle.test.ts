@@ -267,6 +267,32 @@ describe('resolveWebBundle', () => {
     expect(progress.at(-1)).toContain('Committing');
   });
 
+  it('publishes an inline-only release without retained asset files or redundant metadata', async () => {
+    const bundle = await resolveWebBundle({
+      validationMode: 'release-etag',
+      virtualUrl: ENTRY,
+    });
+    const generationDirectory = bundle.sourcePath.replace('/index.html', '');
+    const manifest = JSON.parse(decoder.decode(file(`${generationDirectory}/manifest.json`))) as {
+      downloadedAssets: string[];
+      remoteAssets: Array<{ delivery: string; localFile?: string; url: string }>;
+    };
+    const generationFiles = [...storage.files.keys()]
+      .filter((path) => path.startsWith(`${generationDirectory}/`))
+      .map((path) => path.slice(generationDirectory.length + 1))
+      .sort();
+
+    expect(generationFiles).toEqual(['index.html', 'manifest.json']);
+    expect(storage.directories.has(`${generationDirectory}/assets`)).toBe(false);
+    expect(manifest.downloadedAssets).toEqual([ENTRY, SCRIPT]);
+    expect(manifest.remoteAssets).toEqual([
+      expect.objectContaining({ delivery: 'inline', url: ENTRY }),
+    ]);
+    expect(await readMirroredWebBundle(bundle.sourcePath)).toContain(
+      'document.body.dataset.version'
+    );
+  });
+
   it('isolates origins that collide under filename character replacement', async () => {
     const ipv6Entry = 'https://[2606:4700:4700::1111]/';
     const underscoreEntry = 'https://_2606_4700_4700__1111_/';
@@ -367,6 +393,12 @@ describe('resolveWebBundle', () => {
       generationId: first.generationId,
       usedCachedBundle: true,
     });
+    expect(second.localAssets[wasmUrl]).toMatchObject({
+      mediaType: 'application/wasm',
+    });
+    expect(second.localAssets[wasmUrl]?.path).toContain(
+      `/generations/${first.generationId}/assets/`
+    );
     expect(storage.requests).toEqual([{ etag: '"entry-1"', url: ENTRY }]);
     expect(localHashCalls).toEqual([]);
   });

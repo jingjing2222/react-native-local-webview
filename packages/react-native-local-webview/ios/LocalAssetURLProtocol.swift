@@ -280,7 +280,11 @@ final class LocalAssetURLProtocol: URLProtocol {
         request.validationMode != "release-etag" || !(manifest.bundleEtag ?? "").isEmpty
       else { continue }
       let sourceURL = generationDirectory.appendingPathComponent("index.html")
-      guard let sourceData = try? Data(contentsOf: sourceURL) else { continue }
+      guard
+        let sourceValues = try? sourceURL.resourceValues(forKeys: [.fileSizeKey]),
+        let sourceSize = sourceValues.fileSize,
+        sourceSize >= 0
+      else { continue }
       var assets = [URLProtocolAssetDescriptor]()
       var valid = true
       for asset in manifest.remoteAssets where asset.delivery == "file" {
@@ -322,7 +326,7 @@ final class LocalAssetURLProtocol: URLProtocol {
           path: sourceURL.path,
           responseHeaders: [:],
           responseUrl: runtimeURL,
-          size: Double(sourceData.count)
+          size: Double(sourceSize)
         )
       )
       _ = register(
@@ -330,7 +334,7 @@ final class LocalAssetURLProtocol: URLProtocol {
         baseUrl: runtimeURL,
         basicAuthCredential: basicAuthCredential,
         cookieStore: cookieStore,
-        entryData: sourceData,
+        entryData: nil,
         registryId: registryId
       )
       return CachedDocument(baseUrl: runtimeURL)
@@ -343,7 +347,7 @@ final class LocalAssetURLProtocol: URLProtocol {
     baseUrl: String,
     basicAuthCredential: [String: Any]?,
     cookieStore: WKHTTPCookieStore,
-    entryData: Data,
+    entryData: Data?,
     registryId: String
   ) -> Bool {
     var next = [String: URLProtocolAssetDescriptor]()
@@ -565,12 +569,13 @@ final class LocalAssetURLProtocol: URLProtocol {
     }
 
     let item = DispatchWorkItem { [weak self] in
-      if registry?.entryUrl == Self.normalized(url.absoluteString),
+      let isEntry = registry?.entryUrl == Self.normalized(url.absoluteString)
+      if isEntry,
         let data = registry?.entryData
       {
         self?.serve(data, mediaType: asset.mediaType, requestUrl: url)
       } else {
-        self?.serve(asset, requestUrl: url)
+        self?.serve(asset, requestUrl: url, rateLimited: !isEntry)
       }
     }
     workItem = item
@@ -587,7 +592,11 @@ final class LocalAssetURLProtocol: URLProtocol {
     removeNetworkBodyFile()
   }
 
-  private func serve(_ asset: URLProtocolAssetDescriptor, requestUrl: URL) {
+  private func serve(
+    _ asset: URLProtocolAssetDescriptor,
+    requestUrl: URL,
+    rateLimited: Bool = true
+  ) {
     do {
       let fileUrl = URL(fileURLWithPath: asset.path)
       let values = try fileUrl.resourceValues(forKeys: [.fileSizeKey])
@@ -655,12 +664,14 @@ final class LocalAssetURLProtocol: URLProtocol {
           // NSURLProtocol has no consumer-backpressure signal. Without a
           // bounded producer, a fast local disk can enqueue an entire Unity
           // payload in WebKit before the content process consumes it.
-          let targetElapsed =
-            Double(deliveredBytes) / Double(Self.localStreamBytesPerSecond)
-          let delay =
-            targetElapsed - (ProcessInfo.processInfo.systemUptime - streamStartedAt)
-          if delay > 0 {
-            Thread.sleep(forTimeInterval: delay)
+          if rateLimited {
+            let targetElapsed =
+              Double(deliveredBytes) / Double(Self.localStreamBytesPerSecond)
+            let delay =
+              targetElapsed - (ProcessInfo.processInfo.systemUptime - streamStartedAt)
+            if delay > 0 {
+              Thread.sleep(forTimeInterval: delay)
+            }
           }
         }
       }

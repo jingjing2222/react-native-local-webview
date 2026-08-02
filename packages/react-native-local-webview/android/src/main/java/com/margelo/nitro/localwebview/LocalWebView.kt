@@ -31,6 +31,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.ScriptHandler
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
@@ -62,6 +63,7 @@ private data class LocalAsset(
 private data class CachedDocument(
   val baseUrl: String,
   val html: String,
+  val streamEntryFromFile: Boolean,
 )
 
 private data class ByteRange(
@@ -270,8 +272,11 @@ class LocalWebView(
   private var loadedDocumentId = ""
   private var mainFrameLoadFailed = false
   private var cacheMiss = false
+  private var streamEntryFromFile = false
   private var messagingEnabled = false
   private var usesWebMessageListener = false
+  private var documentStartScriptHandler: ScriptHandler? = null
+  private var usesNativeDocumentStartScript = false
   private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
   private var fullscreenView: View? = null
   private var filePathCallback: ValueCallback<Array<Uri>>? = null
@@ -394,6 +399,7 @@ class LocalWebView(
         if (documentId.isNotEmpty() && documentId != loadedDocumentId) {
           loadedDocumentId = documentId
           cacheMiss = false
+          streamEntryFromFile = false
           if (cacheRequestJson.isNotEmpty()) {
             val request = JSONObject(cacheRequestJson)
             val cached = configureCachedAssets(request)
@@ -405,6 +411,7 @@ class LocalWebView(
             } else {
               baseUrl = cached.baseUrl
               html = cached.html
+              streamEntryFromFile = cached.streamEntryFromFile
               webView.loadUrl(baseUrl)
             }
           } else if (sourceJson.isEmpty()) {
@@ -450,6 +457,9 @@ class LocalWebView(
       pendingDownloadPermissionMessage = null
       context.removeActivityEventListener(activityEventListener)
       removeMessagingBridge()
+      documentStartScriptHandler?.remove()
+      documentStartScriptHandler = null
+      usesNativeDocumentStartScript = false
       webView.webChromeClient = null
       webView.webViewClient = WebViewClient()
       webView.loadUrl("about:blank")
@@ -602,7 +612,26 @@ class LocalWebView(
       }
       messagingEnabled = shouldEnableMessaging
     }
+    configureDocumentStartScript()
     applyAndroidXSettings(settings)
+  }
+
+  private fun configureDocumentStartScript() {
+    documentStartScriptHandler?.remove()
+    documentStartScriptHandler = null
+    usesNativeDocumentStartScript = false
+    if (cacheRequestJson.isEmpty()) return
+    val script = configuration.optNullableString("documentStartScript")
+    if (script.isNullOrEmpty()) return
+    if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+    try {
+      documentStartScriptHandler =
+        WebViewCompat.addDocumentStartJavaScript(webView, script, setOf("*"))
+      usesNativeDocumentStartScript = true
+    } catch (_: UnsupportedOperationException) {
+      // AndroidX and the installed WebView can be updated independently.
+      // Preserve the HTML-injection fallback if feature negotiation races it.
+    }
   }
 
   @Suppress("DEPRECATION")
@@ -799,17 +828,27 @@ class LocalWebView(
         if (inherited) Uri.parse(virtualUrl).encodedFragment
         else manifest.optString("documentFragment").removePrefix("#").ifEmpty { null }
       val runtimeUrl = Uri.parse(documentUrl).buildUpon().encodedFragment(fragment).build().toString()
-      val sourceHtml = prepareCachedHtml(source.readText(Charsets.UTF_8))
+      val canStreamEntry =
+        usesNativeDocumentStartScript ||
+          configuration.optNullableString("documentStartScript").isNullOrEmpty()
+      val sourceHtml =
+        if (canStreamEntry) "" else prepareCachedHtml(source.readText(Charsets.UTF_8))
       nextAssets[normalize(runtimeUrl)] =
         LocalAsset(
           mediaType = "text/html",
           path = source.absolutePath,
           responseHeaders = emptyMap(),
-          size = sourceHtml.toByteArray(Charsets.UTF_8).size.toLong(),
+          size =
+            if (canStreamEntry) source.length()
+            else sourceHtml.toByteArray(Charsets.UTF_8).size.toLong(),
         )
       assets.clear()
       assets.putAll(nextAssets)
-      return CachedDocument(baseUrl = runtimeUrl, html = sourceHtml)
+      return CachedDocument(
+        baseUrl = runtimeUrl,
+        html = sourceHtml,
+        streamEntryFromFile = canStreamEntry,
+      )
     }
     return null
   }
@@ -877,10 +916,15 @@ class LocalWebView(
     val asset = assets[normalize(request.url.toString())] ?: return null
     return try {
       val isEntry = normalize(request.url.toString()) == normalize(baseUrl)
-      val entryBytes = if (isEntry) htmlWithBootstrap().toByteArray(Charsets.UTF_8) else null
-      val file = if (isEntry) null else File(asset.path)
+      val entryBytes =
+        if (isEntry && !streamEntryFromFile) {
+          htmlWithBootstrap().toByteArray(Charsets.UTF_8)
+        } else {
+          null
+        }
+      val file = if (entryBytes == null) File(asset.path) else null
       val actualSize = entryBytes?.size?.toLong() ?: checkNotNull(file).length()
-      if (!isEntry) {
+      if (file != null) {
         check(actualSize == asset.size) {
           "Local asset size mismatch for ${request.url}: expected ${asset.size}, found $actualSize."
         }
@@ -1017,9 +1061,10 @@ class LocalWebView(
     // page script. Direct network sources cannot be rewritten, so retain the
     // react-native-webview onPageStarted fallback for those requests.
     if (
-      sourceJson.isNotEmpty() ||
-        cacheMiss ||
-        configuration.optBoolean("isDirectHtmlSource", false)
+      !usesNativeDocumentStartScript &&
+        (sourceJson.isNotEmpty() ||
+          cacheMiss ||
+          configuration.optBoolean("isDirectHtmlSource", false))
     ) {
       val beforeScript =
         configuration.optNullableString("injectedJavaScriptBeforeContentLoaded").orEmpty()
