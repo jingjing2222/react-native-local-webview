@@ -106,6 +106,11 @@ export type ResolveWebBundleOptions = {
    * install while the mirror is populated in the background.
    */
   onCachedBundle?: (bundle: MirroredWebBundle | undefined) => Promise<void> | void;
+  /**
+   * Called when remote revalidation fails and the last complete generation is
+   * retained. The failure remains non-fatal to `resolveWebBundle`.
+   */
+  onRevalidationFallback?: (bundle: MirroredWebBundle, error: unknown) => Promise<void> | void;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
   /**
@@ -230,6 +235,7 @@ export type WebBundleCacheRequest = {
   generationId?: string;
   maxBytes: number;
   securityPolicyFingerprint: string;
+  startupMode?: 'local-first' | 'webview-cache-first';
   validationMode: WebBundleValidationMode;
   virtualUrl: string;
 };
@@ -558,6 +564,7 @@ function resolveBundlePolicy({
 export function createWebBundleCacheRequest({
   cacheDirectory,
   generationId,
+  startupMode,
   ...options
 }: Pick<
   ResolveWebBundleOptions,
@@ -569,6 +576,7 @@ export function createWebBundleCacheRequest({
 > & {
   cacheDirectory: string;
   generationId?: string;
+  startupMode?: WebBundleCacheRequest['startupMode'];
 }): WebBundleCacheRequest {
   const { generationPolicyFingerprint, policy } = resolveBundlePolicy(options);
   return {
@@ -576,6 +584,7 @@ export function createWebBundleCacheRequest({
     generationId,
     maxBytes: policy.maxBytes,
     securityPolicyFingerprint: generationPolicyFingerprint,
+    startupMode,
     validationMode: options.validationMode ?? 'content-hash',
     virtualUrl: options.virtualUrl,
   };
@@ -2399,6 +2408,7 @@ async function resolveWebBundleUnlocked({
   forceRefresh = false,
   onCachedBundle,
   onPublishedBundle,
+  onRevalidationFallback,
   onProgress,
   signal,
   trustedAssetOrigins,
@@ -2493,6 +2503,7 @@ async function resolveWebBundleUnlocked({
       if (error instanceof ContentSecurityPolicyError || error instanceof RequiredReleaseEtagError)
         throw error;
       onProgress?.('Revalidation failed. Using the last complete local generation.');
+      await onRevalidationFallback?.(cached.bundle, error);
       return cached.bundle;
     }
   }

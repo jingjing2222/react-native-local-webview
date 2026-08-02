@@ -81,9 +81,12 @@ for (const scenario of scenarioResults) {
   }
   if (!isRemote && scenario.phase === 'warm-304') {
     const notModified = requests.filter((request) => request.status === 304).length;
-    if (notModified !== 1) {
+    const webKitCachePreferred = scenario.platform === 'ios';
+    if ((!webKitCachePreferred && notModified !== 1) || (webKitCachePreferred && notModified < 1)) {
       failures.push(
-        `${scenario.label}/warm-304 used ${notModified} conditional responses instead of one release 304.`
+        webKitCachePreferred
+          ? `${scenario.label}/warm-304 did not perform a conditional release check.`
+          : `${scenario.label}/warm-304 used ${notModified} conditional responses instead of one release 304.`
       );
     }
   }

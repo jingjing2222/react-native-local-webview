@@ -48,6 +48,7 @@ type ActiveMount = {
   expectedError: boolean;
   id: number;
   label: string;
+  phase: string;
   virtualUrl: string;
 };
 
@@ -81,6 +82,7 @@ type PendingMount = {
   navigationReadyMilliseconds?: number;
   page?: Record<string, unknown>;
   pageReadyMilliseconds?: number;
+  phase: string;
   reject: (error: Error) => void;
   resolve: (result: MountResult) => void;
   runtime: BenchmarkRuntime;
@@ -173,8 +175,14 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     if (!current?.page) return;
     if (current.runtime === 'remote') {
       if (current.navigationReadyMilliseconds === undefined) return;
-    } else if (!current.storedBundle || current.storageReadyMilliseconds === undefined) {
-      return;
+    } else {
+      if (current.phase === 'offline') {
+        if (!current.bundle) return;
+        current.storedBundle ??= current.bundle;
+        current.storageReadyMilliseconds ??= Date.now() - current.startedAt;
+      } else if (!current.storedBundle || current.storageReadyMilliseconds === undefined) {
+        return;
+      }
     }
     clearTimeout(current.timeout);
     pending.current = undefined;
@@ -233,6 +241,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
           reject,
           resolve,
           runtime: configuration.runtime,
+          phase: next.phase,
           startedAt,
           timeout,
         };
@@ -281,6 +290,7 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
         cacheDirectory,
         expectedError,
         label: `${label}:${phase}`,
+        phase,
         virtualUrl,
       });
       await unmount();
@@ -457,11 +467,15 @@ export default function BenchmarkApp({ configuration }: { configuration: Benchma
     settleIfReady();
   }, [settleIfReady]);
 
-  const handleBundleReady = useCallback((bundle: MirroredWebBundle) => {
-    const current = pending.current;
-    if (!current) return;
-    current.bundle = bundle;
-  }, []);
+  const handleBundleReady = useCallback(
+    (bundle: MirroredWebBundle) => {
+      const current = pending.current;
+      if (!current) return;
+      current.bundle = bundle;
+      settleIfReady();
+    },
+    [settleIfReady]
+  );
 
   const handleBundleStored = useCallback(
     (bundle: MirroredWebBundle) => {

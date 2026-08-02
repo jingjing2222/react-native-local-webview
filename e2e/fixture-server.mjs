@@ -75,7 +75,15 @@ async function requestBody(request) {
     if (size > MIB) throw new Error('Control request body exceeded 1 MiB');
     chunks.push(chunk);
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const source = Buffer.concat(chunks).toString('utf8');
+  if (source.length === 0) {
+    throw new Error(
+      `Empty ${request.method ?? 'unknown'} request body ` +
+        `(content-length=${request.headers['content-length'] ?? 'missing'}, ` +
+        `capture-token=${request.headers['x-react-native-local-webview-body'] ?? 'missing'})`
+    );
+  }
+  return JSON.parse(source);
 }
 
 function hasBenchmarkCookie(request) {
@@ -622,7 +630,10 @@ async function handleFixture(request, response, url) {
       ),
       {
         etag: requestEtag(pathname, true),
-        headers: { 'Content-Type': 'text/javascript; charset=utf-8' },
+        headers: {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'text/javascript; charset=utf-8',
+        },
       }
     );
     return true;
@@ -722,7 +733,11 @@ async function handleFixture(request, response, url) {
   };
   if (kind === 'edge' && !hasCookie && suffix !== '/index.html') {
     respondBytes(request, response, pathname, Buffer.from('cookie-required'), {
-      headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' },
+      headers: {
+        ...headers,
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
       status: 401,
     });
     return true;

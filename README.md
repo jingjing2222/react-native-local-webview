@@ -11,9 +11,10 @@
 available after the operating system evicts the normal WebView cache.
 
 The first visit opens the remote page immediately and stores a complete bundle
-in the background. Later visits can start from app-owned local files while the
-page still sees its original HTTPS URL, origin, cookies, CORS rules, History
-API, workers, WASM, and Range requests.
+in the background. Android later starts from that bundle. iOS keeps WebKit's
+hot-cache path for online starts and activates the app-owned bundle on a real
+network or validation failure. The page still sees its original HTTPS URL,
+origin, cookies, CORS rules, History API, workers, WASM, and Range requests.
 
 ## Is it a good fit?
 
@@ -27,15 +28,15 @@ Use it when:
 Prefer a normal WebView when durable offline availability is unnecessary. An
 already-hot HTTP cache can be faster and use less app-owned storage.
 
-| Behavior        | Normal WebView cache         | `LocalWebView`                              |
-| --------------- | ---------------------------- | ------------------------------------------- |
-| Cache ownership | Operating system             | Your application                            |
-| Offline release | Independent cached responses | One complete published generation           |
-| First visit     | Remote page                  | Remote page, background installation        |
-| Later visit     | Depends on HTTP cache policy | Published local generation                  |
-| Page origin     | HTTPS                        | The same HTTPS origin                       |
-| Update check    | Browser-defined              | One release ETag request                    |
-| Recovery        | Browser cache behavior       | Previous complete generation or remote page |
+| Behavior        | Normal WebView cache         | `LocalWebView`                                |
+| --------------- | ---------------------------- | --------------------------------------------- |
+| Cache ownership | Operating system             | Your application                              |
+| Offline release | Independent cached responses | One complete published generation             |
+| First visit     | Remote page                  | Remote page, background installation          |
+| Later visit     | Depends on HTTP cache policy | Android local; iOS WebKit with local fallback |
+| Page origin     | HTTPS                        | The same HTTPS origin                         |
+| Update check    | Browser-defined              | One release ETag request                      |
+| Recovery        | Browser cache behavior       | Previous complete generation or remote page   |
 
 ## Install
 
@@ -208,22 +209,26 @@ The repository benchmark compares direct HTTPS loading with local delivery for
 release checks, Range fetches, workers, WASM, cookies, CSP, and memory use.
 
 The latest Release smoke runs measured the 50 MiB graph as follows. Each warm
-local start served zero network response-body bytes and performed one release
-`304` behind the visible page.
+candidate start served zero network response-body bytes. Android added one
+release `304`; iOS kept WebKit's normal validators and added one release check
+behind the visible page.
 
 | Runtime                 | Direct warm | Local warm | Local offline |
 | ----------------------- | ----------: | ---------: | ------------: |
 | Android latest          |      1.94 s |     0.56 s |        0.54 s |
 | Android low-end         |      6.68 s |     0.54 s |        0.48 s |
-| iPhone 17 Pro simulator |      0.62 s |     1.06 s |        0.80 s |
+| iPhone 17 Pro simulator |      0.60 s |     0.92 s |        0.96 s |
 
-Local delivery is not universally faster than a hot HTTP cache: the tested iOS
-simulator favored direct WebKit caching for this graph. The durable path trades
-additional first-install traffic, storage, and host memory for deterministic
-offline availability. On the latest Android profile, for example, the local
-first page took 8.29 s versus 3.55 s direct and peak PSS was 225.6 MiB versus
-123.4 MiB. These are single-run emulator and simulator measurements, not
-physical-device production guarantees.
+Android starts the durable generation directly. iOS starts its ordinary WebKit
+cache immediately and keeps the durable generation as fallback; there is no
+fixed fallback timer. A failed release check or navigation activates the local
+generation, while a fully offline network path selects it immediately. The
+tested iOS simulator still favored a direct WebView by 0.32 s for this graph.
+The durable path trades additional first-install traffic, storage, and host
+memory for deterministic offline availability. On the latest Android profile,
+for example, the local first page took 8.29 s versus 3.55 s direct and peak PSS
+was 225.6 MiB versus 123.4 MiB. These are single-run emulator and simulator
+measurements, not physical-device production guarantees.
 
 See the [package guide](./packages/react-native-local-webview/README.md) for the
 complete usage reference, [E2E guide](./e2e/README.md) for benchmark mechanics,

@@ -61,19 +61,22 @@ first run intentionally downloads the direct page and durable copy in parallel.
 
 1. JavaScript sends the view only a cache request containing the origin, cache
    directory, policy limits, validation mode, and security fingerprint.
-2. The iOS or Android implementation reads `state.json`, the active manifest,
-   and referenced file metadata directly from persistent storage. It keeps the
-   localized `index.html` as a file-backed response instead of materializing it
-   through React state or a native in-memory byte buffer.
-3. The implementation registers the local request map and starts navigation at
-   the original HTTPS URL. iOS streams the entry through the URL protocol.
-   Android uses the document-start script API when available, then streams the
-   entry through `shouldInterceptRequest`; older System WebViews use the
-   in-memory script-injection fallback.
-4. Matching requests are served from the published generation while the page
-   retains its HTTPS browsing context.
-5. After the local page loads, background validation begins. In
-   `release-etag` mode this is one conditional entry request.
+2. Android reads `state.json`, the active manifest, and referenced file metadata
+   directly from persistent storage, registers the local request map, and
+   starts navigation at the original HTTPS URL. The document-start API is used
+   when available, followed by streaming `shouldInterceptRequest` responses;
+   older System WebViews use the in-memory script-injection fallback.
+3. iOS starts the original URL on WebKit's ordinary cache path immediately. The
+   process-wide HTTPS protocol explicitly leaves GET and HEAD on WebKit while
+   forwarding mutating requests through a streamed native upload task so their
+   bodies survive protocol registration.
+4. iOS retains the published generation without sending its HTML or inventory
+   through React state. A missing network path, navigation failure, or actual
+   release-check failure switches to the file-backed local generation. There is
+   no fixed fallback timeout.
+5. Background validation runs alongside the visible page. In `release-etag`
+   mode the library adds one conditional entry request; WebKit may also perform
+   its normal per-resource cache validations on iOS.
 6. A changed release is installed as a separate generation and becomes active
    on a later mount; it does not replace bytes under the running page.
 

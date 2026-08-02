@@ -151,6 +151,7 @@ final class LocalAssetURLProtocol: URLProtocol {
   private static var registries = [String: URLProtocolRegistry]()
   private static var registryOrder = [String]()
   private static var requestBodies = [String: URLProtocolRequestBody]()
+  private static var systemLoadingOrigins = [String: String]()
 
   private let cancellationLock = NSLock()
   private var cancelled = false
@@ -385,6 +386,7 @@ final class LocalAssetURLProtocol: URLProtocol {
       entryUrl: hasEntry ? normalizedEntryUrl : nil,
       origins: nextOrigins
     )
+    systemLoadingOrigins.removeValue(forKey: registryId)
     registryOrder.removeAll { $0 == registryId }
     registryOrder.append(registryId)
     stateLock.unlock()
@@ -439,6 +441,40 @@ final class LocalAssetURLProtocol: URLProtocol {
     stateLock.lock()
     registries.removeValue(forKey: registryId)
     registryOrder.removeAll { $0 == registryId }
+    systemLoadingOrigins.removeValue(forKey: registryId)
+    let bodyFiles = requestBodies.values
+      .filter { $0.ownerId == registryId }
+      .map(\.fileUrl)
+    requestBodies = requestBodies.filter { $0.value.ownerId != registryId }
+    stateLock.unlock()
+    for fileUrl in bodyFiles {
+      try? FileManager.default.removeItem(at: fileUrl)
+    }
+  }
+
+  static func preferSystemLoading(
+    baseUrl: String,
+    cookieStore: WKHTTPCookieStore,
+    registryId: String
+  ) {
+    let preferredOrigin = origin(of: baseUrl)
+    stateLock.lock()
+    registryOrder.removeAll { $0 == registryId }
+    if let preferredOrigin {
+      systemLoadingOrigins[registryId] = preferredOrigin
+      registries[registryId] = URLProtocolRegistry(
+        assets: [:],
+        basicAuthCredential: nil,
+        cookieStore: cookieStore,
+        entryData: nil,
+        entryUrl: nil,
+        origins: [preferredOrigin]
+      )
+      registryOrder.append(registryId)
+    } else {
+      systemLoadingOrigins.removeValue(forKey: registryId)
+      registries.removeValue(forKey: registryId)
+    }
     let bodyFiles = requestBodies.values
       .filter { $0.ownerId == registryId }
       .map(\.fileUrl)
@@ -539,7 +575,7 @@ final class LocalAssetURLProtocol: URLProtocol {
     guard let url = request.url, url.scheme?.lowercased() == "https" else {
       return false
     }
-    return registry(for: url) != nil
+    return registry(for: request) != nil
   }
 
   override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -558,7 +594,7 @@ final class LocalAssetURLProtocol: URLProtocol {
       client?.urlProtocol(self, didFailWithError: runtimeError("Missing asset URL."))
       return
     }
-    let registry = Self.registry(for: url)
+    let registry = Self.registry(for: request)
     requestBasicAuthCredential = registry?.basicAuthCredential
     requestCookieStore = registry?.cookieStore
     let method = request.httpMethod?.uppercased() ?? "GET"
@@ -813,7 +849,9 @@ final class LocalAssetURLProtocol: URLProtocol {
       delegate: delegate,
       delegateQueue: nil
     )
-    let task = session.dataTask(with: networkRequest)
+    let task = networkRequest.httpBodyStream == nil
+      ? session.dataTask(with: networkRequest)
+      : session.uploadTask(withStreamedRequest: networkRequest)
     networkSessionDelegate = delegate
     networkSession = session
     networkTask = task
@@ -977,11 +1015,26 @@ final class LocalAssetURLProtocol: URLProtocol {
     return components.url?.absoluteString ?? url
   }
 
-  private static func registry(for url: URL) -> URLProtocolRegistry? {
+  private static func registry(for request: URLRequest) -> URLProtocolRegistry? {
+    guard let url = request.url else { return nil }
     let normalizedUrl = normalized(url.absoluteString)
     let requestOrigin = origin(of: url)
+    let method = request.httpMethod?.uppercased() ?? "GET"
     stateLock.lock()
     defer { stateLock.unlock() }
+    if let requestOrigin,
+      systemLoadingOrigins.values.contains(requestOrigin)
+    {
+      guard method != "GET", method != "HEAD" else { return nil }
+      for registryId in registryOrder.reversed() {
+        guard
+          systemLoadingOrigins[registryId] == requestOrigin,
+          let registry = registries[registryId]
+        else { continue }
+        return registry
+      }
+      return nil
+    }
     // NSURLProtocol registration is process-wide. Prefer an exact local asset
     // match before selecting an origin context for network pass-through, so a
     // newer view at the same origin cannot steal unrelated local paths.

@@ -2,10 +2,12 @@
 
 Run CSR and Unity WebGL bundles from durable local storage without giving up their HTTPS origin.
 
-`LocalWebView` displays the real remote page on a first visit, installs a
-complete local bundle in the background, and uses that bundle on later visits.
-The page keeps its original HTTPS URL, secure context, cookies, CORS behavior,
-History API, workers, WASM, and Range requests.
+`LocalWebView` displays the real remote page on a first visit and installs a
+complete local bundle in the background. Android uses that bundle on later
+visits. iOS preserves WebKit's hot-cache path online and activates the bundle
+when the network or release check fails. The page keeps its original HTTPS URL,
+secure context, cookies, CORS behavior, History API, workers, WASM, and Range
+requests.
 
 ## Installation
 
@@ -104,9 +106,16 @@ available for later offline use.
 
 ### Warm visit
 
-The last complete generation starts from local storage. A release check happens
-behind the visible page. A changed release is installed atomically and becomes
-available on the next mount.
+Android starts the last complete generation from local storage. iOS starts the
+ordinary WebKit URL immediately so a hot WebKit cache remains the fastest
+online path, while retaining the complete generation as a durable fallback. A
+release check happens behind the visible page. A changed release is installed
+atomically and becomes available on the next mount.
+
+iOS does not wait for an arbitrary fallback timeout. A fully offline network
+path opens the local generation immediately. If the device still has a network
+path but the origin or its subresources fail, the real navigation or release
+check failure activates the local generation.
 
 For `release-etag` generations, parser-bound resources such as JavaScript, CSS,
 and bounded images are stored only inside the localized `index.html`. The warm
@@ -118,8 +127,10 @@ fetches.
 
 ### Offline visit
 
-The last complete generation starts without waiting for the network. A failed
-background update check does not delete it.
+The last complete generation starts immediately when the platform reports no
+network path. When a path exists but the origin is unreachable, the failed
+release check switches iOS to that generation. A failed update check never
+deletes it.
 
 ### Failed local generation
 
@@ -254,7 +265,9 @@ component without mounting a WebView.
 />
 ```
 
-- `onBundleReady` reports the local generation selected for display.
+- `onBundleReady` reports a local generation only when it is selected for
+  display. On an online iOS WebKit-cache start, `onBundleStored` can fire without
+  `onBundleReady`.
 - `onBundleStored` reports a newly installed or revalidated generation.
 - `onCacheRollback` reports automatic or explicit rollback.
 - `onBundleError` reports installation and validation failures. The visible

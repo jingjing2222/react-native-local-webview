@@ -8,10 +8,11 @@ Every production benchmark is an A/B run:
 
 - the baseline uses `LocalWebView` with durable mirroring disabled and relies
   only on the WebView's normal HTTP cache;
-- the candidate opens the remote page immediately on a cache miss, starts
-  saving the same URL graph after document load, and starts later mounts from
-  the atomically published durable graph while one required release-ETag check
-  runs behind the visible page.
+- the candidate opens the remote page immediately on a cache miss and saves the
+  same URL graph in the background. Android starts later mounts from the
+  published graph. iOS starts WebKit's ordinary cache immediately and retains
+  the graph as fallback while one required release-ETag check runs behind the
+  visible page.
 
 Both sides use a run-specific query key, the same fixture graph, the same release
 app, and the same emulator or simulator profile. The generated comparison reports
@@ -95,20 +96,22 @@ stable device claims.
 | ----------------------- | -----------------: | ----------------: | ------------: | --------------: | -------------: |
 | Android latest          |             1.94 s |            0.56 s |        0.54 s |         0.096 s |        0.067 s |
 | Android low-end         |             6.68 s |            0.54 s |        0.48 s |         0.171 s |        0.037 s |
-| iPhone 17 Pro simulator |             0.62 s |            1.06 s |        0.80 s |         0.329 s |        0.481 s |
+| iPhone 17 Pro simulator |             0.60 s |            0.92 s |        0.96 s |         0.351 s |         0.58 s |
 
-Every local warm result transferred zero response-body bytes and used one
-release-ETag `304`; direct WebViews issued their normal per-resource cache
-requests. The local path is deliberately not presented as a universal latency
-win: hot WebKit caching was faster on this iOS smoke run. Its guaranteed benefit
-is an app-owned complete generation that still starts when the origin is
-unreachable.
+Every warm result in this table transferred zero response-body bytes. Android
+used one release-ETag `304`. iOS started its ordinary WebKit cache immediately,
+so WebKit issued its normal per-resource validators while the durable cache ran
+one release check in parallel. The local path is deliberately not presented as
+a universal latency win: a direct WebView remained 0.32 s faster on this iOS
+smoke run. Its guaranteed benefit is an app-owned complete generation that is
+activated on a real navigation or release-check failure, without a fixed
+timeout.
 
 The cost is front-loaded. On Android latest, the first 50 MiB page took 8.29 s
 local versus 3.55 s direct because the visible page and background durable copy
 download concurrently, and peak PSS was 225.6 MiB versus 123.4 MiB. Android
 low-end peak PSS was 215.5 MiB local versus 116.6 MiB direct. The iOS local run
-peaked at 1,203 MiB combined app/WebKit RSS versus 1,108 MiB direct.
+peaked at 1,234 MiB combined app/WebKit RSS versus 975 MiB direct.
 
 ## Measured iOS simulator run
 

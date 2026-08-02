@@ -227,6 +227,7 @@ describe('resolveWebBundle', () => {
       cacheDirectory: '/documents/origin',
       cachePolicy: { maxBytes: 1234, maxGenerations: 3, maxInlineBytes: 567 },
       generationId: '1-2-12345678-90abcdef',
+      startupMode: 'webview-cache-first',
       trustedAssetOrigins: ['https://cdn.example'],
       validationMode: 'release-etag',
       virtualUrl: ENTRY,
@@ -236,6 +237,7 @@ describe('resolveWebBundle', () => {
       cacheDirectory: '/documents/origin',
       generationId: '1-2-12345678-90abcdef',
       maxBytes: 1234,
+      startupMode: 'webview-cache-first',
       validationMode: 'release-etag',
       virtualUrl: ENTRY,
     });
@@ -1027,11 +1029,23 @@ describe('resolveWebBundle', () => {
   it('uses the last verified generation when revalidation is offline', async () => {
     const first = await resolveWebBundle({ virtualUrl: ENTRY });
     storage.responses.set(ENTRY, { error: new Error('offline') });
+    const fallbacks: Array<{ error: unknown; generationId: string }> = [];
 
-    const second = await resolveWebBundle({ virtualUrl: ENTRY });
+    const second = await resolveWebBundle({
+      onRevalidationFallback: (bundle, error) => {
+        fallbacks.push({ error, generationId: bundle.generationId });
+      },
+      virtualUrl: ENTRY,
+    });
 
     expect(second.generationId).toBe(first.generationId);
     expect(second.usedCachedBundle).toBe(true);
+    expect(fallbacks).toEqual([
+      {
+        error: expect.objectContaining({ message: 'offline' }),
+        generationId: first.generationId,
+      },
+    ]);
   });
 
   it('reports a cache miss or verified generation before starting network work', async () => {
