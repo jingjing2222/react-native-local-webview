@@ -116,7 +116,7 @@ const localCompletion = completion(local);
 if (remoteCompletion?.runtime !== 'remote') {
   throw new Error(`${remoteResultPath} is not a direct remote WebView result`);
 }
-if (localCompletion?.runtime !== 'native') {
+if (localCompletion?.runtime !== 'local') {
   throw new Error(`${localResultPath} is not a Nitro local runtime result`);
 }
 for (const field of ['origin']) {
@@ -166,8 +166,8 @@ const markdown = [
   '',
   `- Origin: \`${local.origin}\``,
   `- Suite: \`${localCompletion.suite}\``,
-  '- Baseline: `react-native-webview` loading each remote HTTPS URL directly with its normal HTTP cache.',
-  '- Candidate: `NativeLocalWebView`; a cache miss displays the same remote HTTPS document immediately while durable installation continues in the background. Later mounts use the verified local generation.',
+  '- Baseline: the built-in WebView loading each remote HTTPS URL directly with its normal HTTP cache.',
+  '- Candidate: `LocalWebView`; a cache miss displays the same remote HTTPS document immediately while durable installation continues in the background. Later mounts start from the atomically published local generation and validate one required release ETag behind the visible page.',
   `- Direct WebView peak RSS: ${(remoteMemory.rssKib / 1024).toFixed(1)} MiB`,
   `- Nitro local peak RSS: ${(localMemory.rssKib / 1024).toFixed(1)} MiB (${delta(
     localMemory.rssKib,

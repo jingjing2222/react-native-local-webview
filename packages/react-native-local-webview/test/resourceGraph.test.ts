@@ -492,7 +492,7 @@ describe('complete CSR asset graph', () => {
     expect(result.html).toContain(encodeURIComponent(`${origin}/assets/math.wasm`));
     expect(
       result.assets.find((asset) => asset.url === `${origin}/assets/math.wasm`)?.delivery
-    ).toBe('bridge');
+    ).toBe('file');
     expect(result.html).toContain('data:text/css;charset=utf-8,');
     expect(result.html).toContain('srcset="data:image/png;base64,');
     expect(result.html).not.toContain('src="/assets/');
@@ -594,7 +594,7 @@ describe('complete CSR asset graph', () => {
     for (const file of files.filter((file) => !file.includes('.framework.js'))) {
       const url = `${origin}/play/${file}`;
       expect(result.html).toContain(url);
-      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('bridge');
+      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('file');
     }
     const frameworkUrl = `${origin}/play/Build/game.framework.js.gz`;
     expect(result.assets.find((asset) => asset.url === frameworkUrl)?.delivery).toBe('inline');
@@ -651,7 +651,7 @@ describe('complete CSR asset graph', () => {
     for (const name of ['game.data', 'game.wasm']) {
       const url = `${origin}/play/Build/${name}`;
       expect(result.html).toContain(url);
-      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('bridge');
+      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('file');
     }
     const frameworkUrl = `${origin}/play/Build/game.framework.js`;
     expect(result.assets.find((asset) => asset.url === frameworkUrl)?.delivery).toBe('inline');
@@ -661,7 +661,7 @@ describe('complete CSR asset graph', () => {
     expect(result.html).not.toContain(`${origin}/game.loader.js`);
   });
 
-  it('keeps Unity decompression-fallback framework files on the local fetch bridge', async () => {
+  it('keeps Unity decompression-fallback framework files in local storage', async () => {
     const origin = 'https://game.example';
     const frameworkUrl = `${origin}/play/Build/game.framework.js.unityweb`;
     const result = await localizeWebDocument({
@@ -678,7 +678,7 @@ describe('complete CSR asset graph', () => {
     });
 
     expect(result.html).toContain(frameworkUrl);
-    expect(result.assets.find((asset) => asset.url === frameworkUrl)?.delivery).toBe('bridge');
+    expect(result.assets.find((asset) => asset.url === frameworkUrl)?.delivery).toBe('file');
     expect(result.html).not.toContain('data:text/javascript;base64,AQIDBA==');
   });
 
@@ -775,7 +775,7 @@ describe('complete CSR asset graph', () => {
           [`${origin}/api/config.json`, `${origin}/api/literal.json`].includes(asset.url)
         )
         .map((asset) => asset.delivery)
-    ).toEqual(['bridge', 'bridge']);
+    ).toEqual(['file', 'file']);
   });
 
   it('collects unshadowed global receiver fetch calls without treating arbitrary methods as fetch', async () => {
@@ -808,7 +808,7 @@ describe('complete CSR asset graph', () => {
     expect(seen).toEqual(new Set(urls));
     for (const url of urls) {
       expect(result.html).toContain(`fetch("${url}")`);
-      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('bridge');
+      expect(result.assets.find((asset) => asset.url === url)?.delivery).toBe('file');
     }
     expect(result.html).toContain('globalThis.api.fetch("/assets/not-an-inventory-entry.json")');
     expect(result.html).toContain('window.fetch("/assets/shadowed-window.json")');
@@ -839,7 +839,7 @@ describe('complete CSR asset graph', () => {
     expect(seen).toEqual(new Set([dataUrl]));
     expect(result.html).toContain(`alias.open("get", "${dataUrl}")`);
     expect(result.html).toContain('shadowed.open("GET", "/Build/shadowed.data")');
-    expect(result.assets.find((asset) => asset.url === dataUrl)?.delivery).toBe('bridge');
+    expect(result.assets.find((asset) => asset.url === dataUrl)?.delivery).toBe('file');
   });
 
   it('leaves non-executable script data blocks untouched', async () => {
@@ -1098,7 +1098,7 @@ describe('complete CSR asset graph', () => {
     expect(moduleCode).toContain(
       `window.fetch(new globalThis.URL("${configUrl}", "${moduleUrl}"))`
     );
-    expect(result.assets.find((asset) => asset.url === configUrl)?.delivery).toBe('bridge');
+    expect(result.assets.find((asset) => asset.url === configUrl)?.delivery).toBe('file');
     expect(moduleCode).toContain(`globalThis.moduleUrl = "${moduleUrl}"`);
     expect(moduleCode).toContain('new URL("./untouched.png", location.href)');
   });
@@ -1128,7 +1128,7 @@ describe('complete CSR asset graph', () => {
       expect(moduleCode).toContain('new URL("data:image/png;base64,AQID"');
       expect(moduleCode).toContain(`fetch("${textureUrl}")`);
       expect(result.assets.filter((asset) => asset.url === textureUrl)).toHaveLength(1);
-      expect(result.assets.find((asset) => asset.url === textureUrl)?.delivery).toBe('bridge');
+      expect(result.assets.find((asset) => asset.url === textureUrl)?.delivery).toBe('file');
     }
   );
 
@@ -1194,7 +1194,7 @@ describe('complete CSR asset graph', () => {
     expect(workerCode).toContain('postMessage("ready")');
   });
 
-  it('keeps fetch(new URL()) on the Worker bridge instead of inlining its response', async () => {
+  it('keeps fetch(new URL()) as a local file instead of inlining its response', async () => {
     const origin = 'https://worker-fetch-url.example';
     const workerUrl = `${origin}/workers/main.js`;
     const configUrl = `${origin}/workers/config.json`;
@@ -1214,7 +1214,7 @@ describe('complete CSR asset graph', () => {
     const graph = materializedWorkerGraph(result.html);
     const workerCode = graph.sources.get(graph.materialize(graph.rootIds[0]!));
     expect(workerCode).toContain(`new globalThis.URL("${configUrl}", "${workerUrl}")`);
-    expect(result.assets.find((asset) => asset.url === configUrl)?.delivery).toBe('bridge');
+    expect(result.assets.find((asset) => asset.url === configUrl)?.delivery).toBe('file');
   });
 
   it('collects immutable Worker XMLHttpRequest GET assets without matching shadowed receivers', async () => {
@@ -1245,7 +1245,7 @@ describe('complete CSR asset graph', () => {
     });
 
     expect(seen).toEqual(new Set([workerUrl, wasmUrl]));
-    expect(result.assets.find((asset) => asset.url === wasmUrl)?.delivery).toBe('bridge');
+    expect(result.assets.find((asset) => asset.url === wasmUrl)?.delivery).toBe('file');
     const graph = materializedWorkerGraph(result.html);
     const workerCode = graph.sources.get(graph.materialize(graph.rootIds[0]!));
     expect(workerCode).toContain(`alias.open("GET", "${wasmUrl}")`);

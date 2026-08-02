@@ -35,6 +35,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 env:
   RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

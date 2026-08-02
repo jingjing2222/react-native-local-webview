@@ -3,13 +3,13 @@ set -euo pipefail
 
 suite="${1:-full}"
 origin="${2:-https://macmini.taile38920.ts.net:8443}"
-runtime="${3:-native}"
+runtime="${3:-local}"
 if [[ "$suite" != "full" && "$suite" != "smoke" && "$suite" != "props" ]]; then
-  echo "Usage: $0 [full|smoke|props] [origin] [bridge|native|remote]" >&2
+  echo "Usage: $0 [full|smoke|props] [origin] [local|remote]" >&2
   exit 2
 fi
-if [[ "$runtime" != "bridge" && "$runtime" != "native" && "$runtime" != "remote" ]]; then
-  echo "Usage: $0 [full|smoke|props] [origin] [bridge|native|remote]" >&2
+if [[ "$runtime" != "local" && "$runtime" != "remote" ]]; then
+  echo "Usage: $0 [full|smoke|props] [origin] [local|remote]" >&2
   exit 2
 fi
 
@@ -17,7 +17,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 artifact_root="${BENCHMARK_ARTIFACTS:-e2e/artifacts}"
 mkdir -p "$artifact_root"
-run_id="${BENCHMARK_RUN_ID:-ios-simulator-${runtime}-${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)}"
+run_id="${BENCHMARK_RUN_ID:-ios-simulator-${runtime}-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%dT%H%M%SZ)}"
 result_path="$artifact_root/${run_id}.json"
 memory_path="$artifact_root/${run_id}-memory.csv"
 environment_path="$artifact_root/${run_id}-environment.txt"

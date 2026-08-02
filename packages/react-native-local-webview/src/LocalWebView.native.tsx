@@ -3,228 +3,156 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Linking,
+  type NativeSyntheticEvent,
+  Platform,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { callback } from 'react-native-nitro-modules';
 import { URL } from 'react-native-url-polyfill';
-import {
-  WebView,
-  type WebViewMessageEvent,
-  type WebViewNavigation,
-  type WebViewProps,
-} from 'react-native-webview';
-import { parse, parseFragment, serialize, type Element, type Node } from 'parse5';
-
-import { escapeScriptRawText } from './htmlRawText';
+import type {
+  FileDownloadEvent,
+  ShouldStartLoadRequest,
+  WebViewError,
+  WebViewErrorEvent,
+  WebViewEvent,
+  WebViewHttpErrorEvent,
+  WebViewMessageEvent,
+  WebViewNavigation,
+  WebViewNavigationEvent,
+  WebViewOpenWindowEvent,
+  WebViewProgressEvent,
+  WebViewRenderProcessGoneEvent,
+  WebViewScrollEvent,
+  WebViewSource,
+  WebViewSourceUri,
+  WebViewTerminatedEvent,
+  WebViewProps,
+} from './localWebViewTypes';
 import { historyStateFromMessage, type LocalWebViewHistoryState } from './historyState';
-import {
-  ASSET_MESSAGE_CHANNEL,
-  createAssetBridgeScript,
-  type AssetBridgeDescriptor,
-} from './installAssetBridge';
-import { HISTORY_BRIDGE_SCRIPT, HISTORY_MESSAGE_CHANNEL } from './installHistoryBridge';
+import { HISTORY_BRIDGE_SCRIPT } from './installHistoryBridge';
 import {
   cacheDirectoryForOrigin,
+  createWebBundleCacheRequest,
   readMirroredWebBundle,
-  retainWebBundle,
   resolveWebBundle,
+  retainWebBundle,
   rollbackWebBundle,
   type CachePolicy,
   type MirroredWebBundle,
+  type WebBundleValidationMode,
 } from './mirrorWebBundle';
-import type { LocalWebViewCacheAdapter } from './localWebViewCacheAdapter';
-import { prepareWebViewDocument } from './prepareWebViewDocument';
+import { getCacheAdapter } from './nitroCacheAdapter';
+import { prepareRuntimeDocument } from './prepareWebViewDocument';
+import { LocalWebViewHost, type LocalWebViewHostRef } from './LocalWebViewHost';
+import {
+  isOriginAllowed,
+  configurationFromProps,
+  viewPropsFromWebViewProps,
+} from './webViewCompatibility';
 
-const ASSET_CHUNK_BYTES = 192 * 1024;
-const ASSET_ACK_TIMEOUT_MS = 30_000;
-const MAX_CONCURRENT_ASSET_STREAMS = 4;
-const MAX_QUEUED_ASSET_STREAMS = 32;
-const CAPABILITY_BOOTSTRAP_MARKER = 'data-react-native-local-webview-capability';
+const DEFAULT_ORIGIN_WHITELIST = ['http://*', 'https://*'] as const;
+const BACKGROUND_WORK_SETTLE_MS = 3_000;
+const REMOTE_LOAD_INSTALL_TIMEOUT_MS = 10_000;
+const CUSTOM_PROP_NAMES = new Set([
+  'allowContentSecurityPolicyBypass',
+  'cacheDirectory',
+  'cachePolicy',
+  'durableCacheEnabled',
+  'forceRefresh',
+  'onBundleError',
+  'onBundleReady',
+  'onBundleStored',
+  'onCacheRollback',
+  'onHistoryChange',
+  'sourcePath',
+  'trustedAssetOrigins',
+  'validationMode',
+  'virtualUrl',
+]);
 
-type AssetBridgeMessage = {
-  capability?: string;
-  channel?: string;
-  direction?: string;
-  documentId?: string;
-  end?: number;
-  kind?: string;
-  requestId?: string;
-  start?: number;
-  url?: string;
+type AssetManifestEntry = {
+  mediaType: string;
+  originalUrl: string;
+  path: string;
+  redirected: boolean;
+  responseHeaders: Record<string, string>;
+  responseUrl: string;
+  size: number;
 };
 
-function parseAssetMessage(data: string): AssetBridgeMessage | undefined {
-  try {
-    const message = JSON.parse(data) as AssetBridgeMessage;
-    return message.channel === ASSET_MESSAGE_CHANNEL ? message : undefined;
-  } catch {
-    return undefined;
-  }
-}
+type RuntimeDocument = {
+  assetsJson: string;
+  baseUrl: string;
+  cacheRequestJson: string;
+  documentId: string;
+  html: string;
+  sourceJson: string;
+};
 
-function createAssetCapability(): string {
-  const words = new Uint32Array(4);
-  const crypto = globalThis.crypto;
-  if (crypto && typeof crypto.getRandomValues === 'function') {
-    crypto.getRandomValues(words);
-  } else {
-    for (let index = 0; index < words.length; index += 1) {
-      words[index] = Math.floor(Math.random() * 0x1_0000_0000);
-    }
-  }
-  return Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('');
-}
+type EventEnvelope = {
+  nativeEvent: Record<string, unknown>;
+  type:
+    | 'contentProcessDidTerminate'
+    | 'contentSizeChange'
+    | 'customMenuSelection'
+    | 'error'
+    | 'fileDownload'
+    | 'httpError'
+    | 'load'
+    | 'loadProgress'
+    | 'loadStart'
+    | 'loadSubResourceError'
+    | 'message'
+    | 'openWindow'
+    | 'renderProcessGone'
+    | 'runtimeError'
+    | 'scroll'
+    | 'sourceChanged';
+};
 
-function createAssetCapabilityBootstrap(capability: string, expectedOrigin: string): string {
-  return String.raw`
-(() => {
-  const capability = ${JSON.stringify(capability)};
-  const channel = ${JSON.stringify(ASSET_MESSAGE_CHANNEL)};
-  const historyChannel = ${JSON.stringify(HISTORY_MESSAGE_CHANNEL)};
-  const expectedOrigin = ${JSON.stringify(expectedOrigin)};
-  const createDocumentId = () => {
-    const words = new Uint32Array(4);
-    const crypto = globalThis.crypto;
-    if (crypto && typeof crypto.getRandomValues === 'function') {
-      crypto.getRandomValues(words);
-    } else {
-      for (let index = 0; index < words.length; index += 1) {
-        words[index] = Math.floor(Math.random() * 0x100000000);
-      }
-    }
-    return Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('');
-  };
-  let documentId = createDocumentId();
-  if (globalThis.location.origin !== expectedOrigin) return;
-  if (globalThis.__REACT_NATIVE_LOCAL_WEBVIEW_CAPABILITY__ === capability) return;
-  globalThis.__REACT_NATIVE_LOCAL_WEBVIEW_CAPABILITY__ = capability;
-  globalThis.addEventListener(
-    'pageshow',
-    (event) => {
-      if (event.persisted === true) documentId = createDocumentId();
+function createSyntheticEvent<T extends Record<string, unknown>>(
+  type: EventEnvelope['type'],
+  nativeEvent: T
+): NativeSyntheticEvent<T> {
+  let defaultPrevented = false;
+  let propagationStopped = false;
+  const target = typeof nativeEvent.target === 'number' ? nativeEvent.target : 0;
+  const event = {
+    bubbles: undefined,
+    cancelable: undefined,
+    currentTarget: target,
+    dispatchConfig: { registrationName: type },
+    eventPhase: undefined,
+    isDefaultPrevented: () => defaultPrevented,
+    isPropagationStopped: () => propagationStopped,
+    isTrusted: undefined,
+    nativeEvent,
+    persist: () => undefined,
+    preventDefault: () => {
+      defaultPrevented = true;
     },
-    true
-  );
-  const rejectUnauthorizedNativeMessage = (event) => {
-    if (typeof event.data !== 'string') return;
-    try {
-      const message = JSON.parse(event.data);
-      if (
-        message &&
-        message.channel === channel &&
-        message.direction === 'native' &&
-        (globalThis.top !== globalThis || message.capability !== capability)
-      ) {
-        event.stopImmediatePropagation();
-        event.stopPropagation();
-      }
-    } catch {
-      // Non-protocol messages belong to the host application.
-    }
+    stopPropagation: () => {
+      propagationStopped = true;
+    },
+    target,
+    timeStamp: Date.now(),
+    type,
   };
-  globalThis.addEventListener('message', rejectUnauthorizedNativeMessage, true);
-  globalThis.document?.addEventListener('message', rejectUnauthorizedNativeMessage, true);
-  if (globalThis.top !== globalThis) return;
-
-  const nativeBridge = globalThis.ReactNativeWebView;
-  if (!nativeBridge || typeof nativeBridge.postMessage !== 'function') return;
-  const nativePostMessage = nativeBridge.postMessage.bind(nativeBridge);
-  nativeBridge.postMessage = (value) => {
-    if (typeof value === 'string') {
-      try {
-        const message = JSON.parse(value);
-        if (
-          message &&
-          ((message.channel === channel && message.direction === 'web') ||
-            message.channel === historyChannel)
-        ) {
-          message.capability = capability;
-          message.documentId = documentId;
-          return nativePostMessage(JSON.stringify(message));
-        }
-      } catch {
-        // Preserve the native bridge behavior for application messages.
-      }
-    }
-    return nativePostMessage(value);
-  };
-})();
-true;
-`;
+  Object.defineProperty(event, 'defaultPrevented', {
+    enumerable: true,
+    get: () => defaultPrevented,
+  });
+  return event as NativeSyntheticEvent<T>;
 }
-
-function injectCapabilityBootstrap(html: string, capabilityBootstrap: string): string {
-  const document = parse(html);
-  let head: Element | undefined;
-  const visit = (node: Node): void => {
-    if ('tagName' in node && node.tagName === 'head') head = node;
-    if ('childNodes' in node) {
-      for (const child of node.childNodes) visit(child);
-    }
-  };
-  visit(document);
-  if (!head) throw new Error('HTML document does not contain a <head>');
-
-  const capabilityScript = parseFragment(
-    `<script ${CAPABILITY_BOOTSTRAP_MARKER}>${escapeScriptRawText(capabilityBootstrap)}</script>`
-  ).childNodes[0];
-  if (!capabilityScript || !('tagName' in capabilityScript)) {
-    throw new Error('Failed to construct the local document capability bootstrap');
-  }
-  capabilityScript.parentNode = head;
-  head.childNodes.unshift(capabilityScript);
-  return serialize(document);
-}
-
-function createDocumentStartScript(
-  capability: string,
-  expectedOrigin: string,
-  assets: Record<string, AssetBridgeDescriptor>,
-  userSource: string | undefined
-): string {
-  const localRuntime = [
-    createAssetCapabilityBootstrap(capability, expectedOrigin),
-    HISTORY_BRIDGE_SCRIPT,
-    ...(Object.keys(assets).length > 0 ? [createAssetBridgeScript(assets)] : []),
-  ].join('\n');
-  return String.raw`
-if (
-  globalThis.top === globalThis &&
-  globalThis.location.origin === ${JSON.stringify(expectedOrigin)}
-) {
-${localRuntime}
-}
-${userSource ?? ''}
-true;
-`;
-}
-
-function httpOrigin(url: string): string | undefined {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function assetStreamKey(capability: string, requestId: string, bundleEpoch: number): string {
-  return `${capability}:${bundleEpoch}:${requestId}`;
-}
-
-function bridgeMessageEnvelope(
-  data: string
-): { capability?: string; channel?: string; documentId?: string } | undefined {
-  try {
-    return JSON.parse(data) as { capability?: string; channel?: string; documentId?: string };
-  } catch {
-    return undefined;
-  }
-}
-
-export type { LocalWebViewHistoryState } from './historyState';
 
 export type LocalWebViewHandle = {
   clearCache: (includeDiskFiles: boolean) => void;
@@ -241,33 +169,129 @@ export type LocalWebViewHandle = {
   stopLoading: () => void;
 };
 
-export type LocalWebViewProps = Omit<WebViewProps, 'source' | 'renderLoading' | 'renderError'> & {
-  cacheAdapter: LocalWebViewCacheAdapter;
+export type LocalWebViewComponent = ReturnType<
+  typeof forwardRef<LocalWebViewHandle, LocalWebViewProps>
+> & {
+  isFileUploadSupported: () => Promise<boolean>;
+};
+
+export type LocalWebViewProps = Omit<WebViewProps, 'source'> & {
   allowContentSecurityPolicyBypass?: boolean;
   cacheDirectory?: string;
   cachePolicy?: CachePolicy;
+  /**
+   * Disable durable bundle mirroring and load the source directly.
+   *
+   * @default true
+   */
+  durableCacheEnabled?: boolean;
   forceRefresh?: boolean;
   onBundleError?: (error: Error) => void;
   onBundleReady?: (bundle: MirroredWebBundle) => void;
   onBundleStored?: (bundle: MirroredWebBundle) => void;
   onCacheRollback?: (bundle: MirroredWebBundle) => void;
   onHistoryChange?: (state: LocalWebViewHistoryState) => void;
-  renderError?: (error: Error) => ReactNode;
-  renderLoading?: (status: string) => ReactNode;
-  /**
-   * Skip origin-based discovery and open an existing local entry directly.
-   * Its contents are still passed as HTML with `virtualUrl` as the base URL.
-   */
+  source?: WebViewSource;
   sourcePath?: string;
   trustedAssetOrigins?: string[];
-  virtualUrl: string;
+  /**
+   * Validate every resource with hashes, or require one entry ETag that
+   * versions the complete release.
+   *
+   * @default 'content-hash'
+   */
+  validationMode?: WebBundleValidationMode;
+  virtualUrl?: string;
 };
 
 function assertHttpsUrl(virtualUrl: string): void {
   const url = new URL(virtualUrl);
   if (url.protocol !== 'https:' || !url.hostname) {
-    throw new Error('virtualUrl must be an absolute HTTPS URL');
+    throw new Error('virtualUrl or source.uri must be an absolute HTTPS URL');
   }
+}
+
+function remoteUrl(props: Pick<LocalWebViewProps, 'source' | 'virtualUrl'>): string {
+  if (props.virtualUrl && props.source) {
+    throw new Error('Provide either virtualUrl or source, not both');
+  }
+  if (props.virtualUrl) return props.virtualUrl;
+  if (props.source && 'uri' in props.source) return props.source.uri;
+  throw new Error('LocalWebView requires virtualUrl or source');
+}
+
+function htmlSourceDocument(source: Extract<WebViewSource, { html: string }>): RuntimeDocument {
+  const baseUrl = source.baseUrl ?? 'about:blank';
+  return {
+    assetsJson: '[]',
+    baseUrl,
+    cacheRequestJson: '',
+    documentId: `html:${baseUrl}:${source.html}`,
+    html: source.html,
+    sourceJson: '',
+  };
+}
+
+function runtimeDocument(bundle: MirroredWebBundle, sourceHtml: string): RuntimeDocument {
+  const assets: AssetManifestEntry[] = [
+    ...Object.entries(bundle.localAssets).map(([originalUrl, asset]) => ({
+      mediaType: asset.mediaType,
+      originalUrl,
+      path: asset.path,
+      redirected: asset.redirected,
+      responseHeaders: asset.responseHeaders ?? {},
+      responseUrl: asset.responseUrl,
+      size: asset.size,
+    })),
+    {
+      mediaType: 'text/html',
+      originalUrl: bundle.baseUrl,
+      path: bundle.sourcePath,
+      redirected: false,
+      responseHeaders: {},
+      responseUrl: bundle.baseUrl,
+      // The runtime receives the prepared entry separately, so its byte length can
+      // differ from the downloaded source after CSP handling.
+      size: 0,
+    },
+  ];
+  return {
+    assetsJson: JSON.stringify(assets),
+    baseUrl: bundle.baseUrl,
+    cacheRequestJson: '',
+    documentId: bundle.generationId,
+    html: sourceHtml,
+    sourceJson: '',
+  };
+}
+
+function directSourceDocument(source: WebViewSourceUri): RuntimeDocument {
+  const sourceJson = JSON.stringify({
+    body: source.body,
+    headers: source.headers,
+    method: source.method ?? 'GET',
+    uri: source.uri,
+  });
+  return {
+    assetsJson: '[]',
+    baseUrl: source.uri,
+    cacheRequestJson: '',
+    documentId: `source:${sourceJson}`,
+    html: '',
+    sourceJson,
+  };
+}
+
+function cacheDocument(request: ReturnType<typeof createWebBundleCacheRequest>): RuntimeDocument {
+  const cacheRequestJson = JSON.stringify(request);
+  return {
+    assetsJson: '[]',
+    baseUrl: request.virtualUrl,
+    cacheRequestJson,
+    documentId: `cache:${request.securityPolicyFingerprint}:${request.generationId ?? 'published'}:${request.virtualUrl}`,
+    html: '',
+    sourceJson: '',
+  };
 }
 
 function emptyHistoryState(url: string): LocalWebViewHistoryState {
@@ -275,410 +299,472 @@ function emptyHistoryState(url: string): LocalWebViewHistoryState {
     canGoBack: false,
     canGoForward: false,
     length: 1,
-    navigationType: 'initial',
-    state: null,
+    navigationType: 'document',
+    state: undefined,
     stateSerializationFailed: false,
     url,
   };
 }
 
-export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(function LocalWebView(
-  {
-    cacheAdapter,
-    allowContentSecurityPolicyBypass = false,
-    allowsBackForwardNavigationGestures = true,
-    cacheDirectory,
-    cachePolicy,
-    forceRefresh = false,
-    injectedJavaScriptBeforeContentLoaded,
-    onBundleError,
-    onBundleReady,
-    onBundleStored,
-    onCacheRollback,
-    onError,
-    onHistoryChange,
-    onLoad,
-    onLoadStart,
-    onMessage,
-    onNavigationStateChange,
-    renderError,
-    renderLoading,
-    sourcePath,
-    style,
-    trustedAssetOrigins,
-    virtualUrl,
-    ...viewProps
-  },
-  forwardedRef
-) {
-  const [html, setHtml] = useState<string>();
-  const [documentBaseUrl, setDocumentBaseUrl] = useState(virtualUrl);
-  const [status, setStatus] = useState('Looking for a verified local bundle…');
-  const [error, setError] = useState<Error>();
-  const [assetCapability, setAssetCapability] = useState(createAssetCapability);
-  const assetCapabilityRef = useRef(assetCapability);
-  const bundleRef = useRef<MirroredWebBundle | undefined>(undefined);
-  const webViewRef = useRef<WebView>(null);
-  const assetAcknowledgementsRef = useRef(
-    new Map<string, { reject: (error: Error) => void; resolve: () => void }>()
-  );
-  const activeAssetStreamsRef = useRef(new Set<string>());
-  const activeDocumentIdRef = useRef<string | undefined>(undefined);
-  const retiredDocumentIdsRef = useRef(new Set<string>());
-  const queuedAssetStreamsRef = useRef(
-    new Map<string, { bundleEpoch: number; resolve: (acquired: boolean) => void }>()
-  );
-  const cancelledAssetRequestsRef = useRef(new Set<string>());
-  const bundleEpochRef = useRef(0);
-  const documentObservedBeforeLoadStartRef = useRef(false);
-  const loadStartAwaitingDocumentRef = useRef(false);
-  const bundleLeaseReleaseRef = useRef<(() => void) | undefined>(undefined);
-  const loadEpochRef = useRef(0);
-  const initialBundleLoadRef = useRef<'complete' | 'loading' | 'pending'>('complete');
-  const rollbackAttemptedRef = useRef(false);
-  const historyRef = useRef(emptyHistoryState(virtualUrl));
-  const callbacksRef = useRef({
-    onBundleError,
-    onBundleReady,
-    onBundleStored,
-    onCacheRollback,
-  });
-  callbacksRef.current = {
-    onBundleError,
-    onBundleReady,
-    onBundleStored,
-    onCacheRollback,
-  };
-  const cacheRoot = cacheDirectory ?? cacheDirectoryForOrigin(virtualUrl, cacheAdapter);
-  const cacheMaxBytes = cachePolicy?.maxBytes;
-  const cacheMaxGenerations = cachePolicy?.maxGenerations;
-  const cacheMaxInlineBytes = cachePolicy?.maxInlineBytes;
-  const trustedAssetOriginsKey = JSON.stringify([...(trustedAssetOrigins ?? [])].sort());
+function androidDocumentStartScript(props: LocalWebViewProps): string | undefined {
+  if (Platform.OS !== 'android') return undefined;
+  const scripts: string[] = [HISTORY_BRIDGE_SCRIPT];
+  if (props.injectedJavaScriptObject !== undefined) {
+    const objectJson = JSON.stringify(props.injectedJavaScriptObject);
+    scripts.push(`
+      window.ReactNativeWebView = window.ReactNativeWebView || {};
+      window.ReactNativeWebView.injectedObjectJson = function () {
+        return ${JSON.stringify(objectJson)};
+      };
+    `);
+  }
+  if (props.injectedJavaScriptBeforeContentLoaded) {
+    scripts.push(props.injectedJavaScriptBeforeContentLoaded);
+  }
+  return scripts.length > 0 ? scripts.join('\n') : undefined;
+}
 
-  const invalidateAssetStreams = useCallback((reason: string, clearActiveBundle = true): void => {
-    bundleEpochRef.current += 1;
-    if (clearActiveBundle) bundleRef.current = undefined;
-    for (const acknowledgement of assetAcknowledgementsRef.current.values()) {
-      acknowledgement.reject(new Error(reason));
+const LocalWebViewImplementation = forwardRef<LocalWebViewHandle, LocalWebViewProps>(
+  function LocalWebView(props, forwardedRef) {
+    const {
+      allowContentSecurityPolicyBypass = false,
+      cacheDirectory,
+      cachePolicy,
+      containerStyle,
+      durableCacheEnabled = true,
+      forceRefresh = false,
+      renderError,
+      renderLoading,
+      source,
+      sourcePath,
+      startInLoadingState = false,
+      style,
+      trustedAssetOrigins,
+      validationMode = 'content-hash',
+      virtualUrl,
+    } = props;
+    const cacheAdapter = getCacheAdapter();
+    if (virtualUrl !== undefined && source !== undefined) {
+      throw new Error('Provide either virtualUrl or source, not both');
     }
-    assetAcknowledgementsRef.current.clear();
-    for (const queued of queuedAssetStreamsRef.current.values()) {
-      queued.resolve(false);
+    if (sourcePath !== undefined && virtualUrl === undefined) {
+      throw new Error('sourcePath requires virtualUrl');
     }
-    queuedAssetStreamsRef.current.clear();
-    cancelledAssetRequestsRef.current.clear();
-  }, []);
-
-  const acquireAssetStream = useCallback(
-    (requestId: string, bundleEpoch: number): Promise<boolean> => {
-      if (
-        bundleEpochRef.current !== bundleEpoch ||
-        cancelledAssetRequestsRef.current.has(requestId)
-      ) {
-        return Promise.resolve(false);
-      }
-      if (
-        activeAssetStreamsRef.current.has(requestId) ||
-        queuedAssetStreamsRef.current.has(requestId)
-      ) {
-        throw new Error(`Duplicate local asset stream request: ${requestId}`);
-      }
-      if (activeAssetStreamsRef.current.size < MAX_CONCURRENT_ASSET_STREAMS) {
-        activeAssetStreamsRef.current.add(requestId);
-        return Promise.resolve(true);
-      }
-      if (queuedAssetStreamsRef.current.size >= MAX_QUEUED_ASSET_STREAMS) {
-        throw new Error(
-          `Too many queued local asset streams (maximum ${MAX_QUEUED_ASSET_STREAMS})`
-        );
-      }
-      return new Promise<boolean>((resolve) => {
-        queuedAssetStreamsRef.current.set(requestId, { bundleEpoch, resolve });
-      });
-    },
-    []
-  );
-
-  const releaseAssetStream = useCallback((requestId: string): void => {
-    if (!activeAssetStreamsRef.current.delete(requestId)) return;
-    for (const [queuedRequestId, queued] of queuedAssetStreamsRef.current) {
-      queuedAssetStreamsRef.current.delete(queuedRequestId);
-      if (
-        queued.bundleEpoch !== bundleEpochRef.current ||
-        cancelledAssetRequestsRef.current.has(queuedRequestId)
-      ) {
-        queued.resolve(false);
-        continue;
-      }
-      activeAssetStreamsRef.current.add(queuedRequestId);
-      queued.resolve(true);
-      return;
-    }
-  }, []);
-
-  const buildBundleHtml = useCallback(
-    async (bundle: MirroredWebBundle, capability: string): Promise<string> => {
-      const contents = await readMirroredWebBundle(bundle.sourcePath, cacheAdapter);
-      const prepared = prepareWebViewDocument(
-        contents,
-        bundle.localAssets,
-        allowContentSecurityPolicyBypass
-      );
-      return injectCapabilityBootstrap(
-        prepared,
-        createAssetCapabilityBootstrap(capability, httpOrigin(bundle.baseUrl) ?? '')
-      );
-    },
-    [cacheAdapter, allowContentSecurityPolicyBypass]
-  );
-
-  const activateBundle = useCallback(
-    (
-      bundle: MirroredWebBundle,
-      contents: string,
-      capability: string,
-      preparedLease?: () => void
-    ): void => {
-      const nextLease =
-        preparedLease ??
-        (bundle.generationId === 'external'
-          ? undefined
-          : retainWebBundle(cacheRoot, bundle.generationId));
-      const previousLease = bundleLeaseReleaseRef.current;
-      bundleLeaseReleaseRef.current = nextLease;
-      invalidateAssetStreams('The active local bundle changed');
-      activeDocumentIdRef.current = undefined;
-      retiredDocumentIdsRef.current.clear();
-      documentObservedBeforeLoadStartRef.current = false;
-      loadStartAwaitingDocumentRef.current = false;
-      initialBundleLoadRef.current = 'pending';
-      assetCapabilityRef.current = capability;
-      bundleRef.current = bundle;
-      setAssetCapability(capability);
-      setDocumentBaseUrl(bundle.baseUrl);
-      setHtml(contents);
-      previousLease?.();
-    },
-    [cacheRoot, invalidateAssetStreams]
-  );
-
-  const postAssetMessage = useCallback((message: Record<string, unknown>): void => {
-    webViewRef.current?.postMessage(
-      JSON.stringify({
-        channel: ASSET_MESSAGE_CHANNEL,
-        capability: assetCapabilityRef.current,
-        direction: 'native',
-        ...message,
-      })
+    const [document, setDocument] = useState<RuntimeDocument>();
+    const [error, setError] = useState<WebViewError>();
+    const [pageLoading, setPageLoading] = useState(startInLoadingState);
+    const [status, setStatus] = useState('Looking for a durable local bundle…');
+    const hostRef = useRef<LocalWebViewHostRef | undefined>(undefined);
+    const leaseReleaseRef = useRef<(() => void) | undefined>(undefined);
+    const bundleRef = useRef<MirroredWebBundle | undefined>(undefined);
+    const documentEpochRef = useRef(0);
+    const rollbackAttemptedRef = useRef(false);
+    const rollbackRef = useRef<() => Promise<boolean>>(async () => false);
+    const backgroundWorkGateRef = useRef<
+      | {
+          release: () => void;
+          releaseWhenSettled: () => void;
+        }
+      | undefined
+    >(undefined);
+    const historyRef = useRef(
+      emptyHistoryState(
+        virtualUrl ??
+          (source && 'uri' in source
+            ? source.uri
+            : source && 'html' in source
+              ? (source.baseUrl ?? 'about:blank')
+              : 'about:blank')
+      )
     );
-  }, []);
+    const callbacksRef = useRef(props);
+    callbacksRef.current = props;
+    const sourceRef = useRef(source);
+    sourceRef.current = source;
 
-  const waitForAssetAcknowledgement = useCallback(
-    (streamKey: string, requestId: string): Promise<void> =>
-      new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          assetAcknowledgementsRef.current.delete(streamKey);
-          reject(new Error(`Timed out streaming local asset request ${requestId}`));
-        }, ASSET_ACK_TIMEOUT_MS);
-        assetAcknowledgementsRef.current.set(streamKey, {
-          reject: (error) => {
-            clearTimeout(timeout);
-            reject(error);
-          },
-          resolve: () => {
-            clearTimeout(timeout);
-            resolve();
-          },
-        });
-      }),
-    []
-  );
-
-  const streamLocalAsset = useCallback(
-    async (
-      streamKey: string,
-      requestId: string,
-      url: string,
-      requestedStart?: number,
-      requestedEnd?: number
-    ): Promise<void> => {
-      const asset = bundleRef.current?.localAssets[url];
-      const bundleEpoch = bundleEpochRef.current;
-      if (!asset) {
-        postAssetMessage({
-          kind: 'error',
-          message: `No verified local asset for ${url}`,
-          requestId,
-        });
-        return;
+    const documentStartScript = androidDocumentStartScript(props);
+    const configurationJson = useMemo(() => {
+      const configuration = configurationFromProps(props);
+      if (props.nativeConfig?.props) {
+        Object.assign(configuration, props.nativeConfig.props);
       }
-      const start = requestedStart ?? 0;
-      const end = requestedEnd ?? asset.size;
+      configuration.hasOnShouldStartLoadWithRequest =
+        props.onShouldStartLoadWithRequest !== undefined;
+      configuration.hasOnContentSizeChange = props.onContentSizeChange !== undefined;
+      configuration.hasOnFileDownload = props.onFileDownload !== undefined;
+      configuration.hasOnMessage = props.onMessage !== undefined;
+      configuration.hasOnOpenWindow = props.onOpenWindow !== undefined;
+      configuration.hasOnScroll = props.onScroll !== undefined;
+      configuration.isDirectHtmlSource =
+        (props.source !== undefined && 'html' in props.source) ||
+        (props.source === undefined && props.virtualUrl === undefined);
+      configuration.messagingEnabled = Platform.OS === 'android' || props.onMessage !== undefined;
+      configuration.documentStartScript = documentStartScript;
+      configuration.originWhitelist = props.originWhitelist ?? DEFAULT_ORIGIN_WHITELIST;
+      return JSON.stringify(configuration);
+    }, [documentStartScript, props]);
+    const forwardedViewProps = viewPropsFromWebViewProps(
+      props as LocalWebViewProps & Record<string, unknown>,
+      CUSTOM_PROP_NAMES
+    );
+    const preparation = useMemo((): {
+      document?: RuntimeDocument;
+      error?: Error;
+    } => {
       if (
-        !Number.isSafeInteger(start) ||
-        !Number.isSafeInteger(end) ||
-        start < 0 ||
-        end <= start ||
-        end > asset.size
+        !document ||
+        document.cacheRequestJson ||
+        document.sourceJson ||
+        document.documentId.startsWith('html:')
       ) {
-        postAssetMessage({
-          kind: 'error',
-          message: `Invalid local asset byte range for ${url}`,
-          requestId,
-        });
-        return;
+        return { document };
       }
-      let acquired = false;
       try {
-        acquired = await acquireAssetStream(streamKey, bundleEpoch);
-        if (
-          !acquired ||
-          bundleEpochRef.current !== bundleEpoch ||
-          cancelledAssetRequestsRef.current.has(streamKey)
-        ) {
-          return;
-        }
-        for (let position = start; position < end; position += ASSET_CHUNK_BYTES) {
-          if (
-            bundleEpochRef.current !== bundleEpoch ||
-            cancelledAssetRequestsRef.current.has(streamKey)
-          ) {
-            return;
-          }
-          const length = Math.min(ASSET_CHUNK_BYTES, end - position);
-          const data = await cacheAdapter.readFileRange(
-            asset.path,
-            position,
-            position + length,
-            'base64'
-          );
-          if (
-            bundleEpochRef.current !== bundleEpoch ||
-            cancelledAssetRequestsRef.current.has(streamKey)
-          ) {
-            return;
-          }
-          const acknowledgement = waitForAssetAcknowledgement(streamKey, requestId);
-          postAssetMessage({ data, kind: 'chunk', requestId });
-          await acknowledgement;
-        }
-        if (bundleEpochRef.current === bundleEpoch) {
-          postAssetMessage({ kind: 'end', requestId });
-        }
-      } catch (reason) {
-        if (bundleEpochRef.current === bundleEpoch) {
-          const message = reason instanceof Error ? reason.message : String(reason);
-          postAssetMessage({ kind: 'error', message, requestId });
-        }
-      } finally {
-        assetAcknowledgementsRef.current.delete(streamKey);
-        cancelledAssetRequestsRef.current.delete(streamKey);
-        if (acquired) releaseAssetStream(streamKey);
-      }
-    },
-    [
-      acquireAssetStream,
-      cacheAdapter,
-      postAssetMessage,
-      releaseAssetStream,
-      waitForAssetAcknowledgement,
-    ]
-  );
-
-  const rollback = useCallback(async (): Promise<boolean> => {
-    if (sourcePath) return false;
-    const current = bundleRef.current;
-    if (!current || current.generationId === 'external') return false;
-    const loadEpoch = ++loadEpochRef.current;
-    let previous: MirroredWebBundle | undefined;
-    try {
-      previous = await rollbackWebBundle(cacheRoot, cacheAdapter, current.generationId, virtualUrl);
-    } catch (reason) {
-      if (loadEpochRef.current !== loadEpoch) return false;
-      throw reason;
-    }
-    if (loadEpochRef.current !== loadEpoch || !previous) return false;
-    const preparedLease = retainWebBundle(cacheRoot, previous.generationId);
-    const nextCapability = createAssetCapability();
-    let contents: string;
-    try {
-      contents = await buildBundleHtml(previous, nextCapability);
-    } catch (reason) {
-      preparedLease();
-      if (loadEpochRef.current !== loadEpoch) return false;
-      throw reason;
-    }
-    if (loadEpochRef.current !== loadEpoch) {
-      preparedLease();
-      return false;
-    }
-    activateBundle(previous, contents, nextCapability, preparedLease);
-    callbacksRef.current.onCacheRollback?.(previous);
-    return true;
-  }, [activateBundle, cacheAdapter, buildBundleHtml, cacheRoot, sourcePath, virtualUrl]);
-
-  useImperativeHandle(
-    forwardedRef,
-    () => ({
-      clearCache: (includeDiskFiles) => webViewRef.current?.clearCache(includeDiskFiles),
-      clearFormData: () => webViewRef.current?.clearFormData?.(),
-      clearHistory: () => webViewRef.current?.clearHistory?.(),
-      getHistoryState: () => historyRef.current,
-      goBack: () => webViewRef.current?.goBack(),
-      goForward: () => webViewRef.current?.goForward(),
-      injectJavaScript: (script) => webViewRef.current?.injectJavaScript(script),
-      postMessage: (message) => webViewRef.current?.postMessage(message),
-      reload: () => webViewRef.current?.reload(),
-      requestFocus: () => webViewRef.current?.requestFocus(),
-      rollback,
-      stopLoading: () => webViewRef.current?.stopLoading(),
-    }),
-    [rollback]
-  );
-
-  useEffect(
-    () => () => {
-      loadEpochRef.current += 1;
-      invalidateAssetStreams('LocalWebView was unmounted');
-      bundleLeaseReleaseRef.current?.();
-      bundleLeaseReleaseRef.current = undefined;
-    },
-    [invalidateAssetStreams]
-  );
-
-  useEffect(() => {
-    let active = true;
-    const controller = new AbortController();
-    const loadEpoch = ++loadEpochRef.current;
-    invalidateAssetStreams('The requested local bundle changed');
-    bundleLeaseReleaseRef.current?.();
-    bundleLeaseReleaseRef.current = undefined;
-    rollbackAttemptedRef.current = false;
-    initialBundleLoadRef.current = 'complete';
-    historyRef.current = emptyHistoryState(virtualUrl);
-    setHtml(undefined);
-    setError(undefined);
-    setStatus('Looking for a verified local bundle…');
-
-    const bundlePromise = Promise.resolve().then(async (): Promise<MirroredWebBundle> => {
-      assertHttpsUrl(virtualUrl);
-      if (sourcePath) {
         return {
-          baseUrl: virtualUrl,
-          downloadedAssets: [],
-          generationId: 'external',
-          localAssets: {},
-          rollbackAvailable: false,
-          sourcePath,
-          totalBytes: 0,
-          usedCachedBundle: true,
+          document: {
+            ...document,
+            html: prepareRuntimeDocument(
+              document.html,
+              allowContentSecurityPolicyBypass,
+              documentStartScript
+            ),
+          },
+        };
+      } catch (reason) {
+        return {
+          error: reason instanceof Error ? reason : new Error(String(reason)),
         };
       }
-      const normalizedTrustedOrigins = JSON.parse(trustedAssetOriginsKey) as string[];
-      return resolveWebBundle({
+    }, [allowContentSecurityPolicyBypass, document, documentStartScript]);
+    useEffect(() => {
+      if (!preparation.error) return;
+      callbacksRef.current.onBundleError?.(preparation.error);
+      setPageLoading(false);
+      setError({
+        canGoBack: false,
+        canGoForward: false,
+        code: -1,
+        description: preparation.error.message,
+        domain: 'ReactNativeLocalWebView',
+        loading: false,
+        lockIdentifier: 0,
+        title: '',
+        url: document?.baseUrl ?? 'about:blank',
+      });
+    }, [document?.baseUrl, preparation.error]);
+    const preparedDocument = preparation.document;
+
+    const handleEvent = useCallback((serialized: string) => {
+      let envelope: EventEnvelope;
+      try {
+        envelope = JSON.parse(serialized) as EventEnvelope;
+      } catch {
+        return;
+      }
+      const current = callbacksRef.current;
+      const event = createSyntheticEvent(envelope.type, envelope.nativeEvent) as unknown;
+      const updateHistory = (fallbackNavigationType: string) => {
+        const nativeEvent = envelope.nativeEvent;
+        historyRef.current = {
+          ...historyRef.current,
+          canGoBack:
+            typeof nativeEvent.canGoBack === 'boolean'
+              ? nativeEvent.canGoBack
+              : historyRef.current.canGoBack,
+          canGoForward:
+            typeof nativeEvent.canGoForward === 'boolean'
+              ? nativeEvent.canGoForward
+              : historyRef.current.canGoForward,
+          navigationType:
+            typeof nativeEvent.navigationType === 'string'
+              ? nativeEvent.navigationType
+              : fallbackNavigationType,
+          url: typeof nativeEvent.url === 'string' ? nativeEvent.url : historyRef.current.url,
+        };
+        current.onHistoryChange?.(historyRef.current);
+      };
+      switch (envelope.type) {
+        case 'contentProcessDidTerminate':
+          current.onContentProcessDidTerminate?.(event as WebViewTerminatedEvent);
+          return;
+        case 'contentSizeChange':
+          current.onContentSizeChange?.(event as WebViewEvent);
+          return;
+        case 'customMenuSelection':
+          current.onCustomMenuSelection?.(
+            event as Parameters<NonNullable<WebViewProps['onCustomMenuSelection']>>[0]
+          );
+          return;
+        case 'error': {
+          backgroundWorkGateRef.current?.release();
+          const nextError = envelope.nativeEvent as unknown as WebViewError;
+          const errorEvent = event as WebViewErrorEvent;
+          setPageLoading(false);
+          errorEvent.persist();
+          current.onError?.(errorEvent);
+          current.onLoadEnd?.(errorEvent);
+          if (!errorEvent.isDefaultPrevented()) setError(nextError);
+          if (bundleRef.current?.rollbackAvailable && !rollbackAttemptedRef.current) {
+            rollbackAttemptedRef.current = true;
+            void rollbackRef.current().catch((reason: unknown) => {
+              const rollbackError = reason instanceof Error ? reason : new Error(String(reason));
+              callbacksRef.current.onBundleError?.(rollbackError);
+            });
+          }
+          return;
+        }
+        case 'fileDownload':
+          current.onFileDownload?.(event as FileDownloadEvent);
+          return;
+        case 'httpError':
+          current.onHttpError?.(event as WebViewHttpErrorEvent);
+          return;
+        case 'load':
+          if (
+            bundleRef.current !== undefined &&
+            (current.validationMode ?? 'content-hash') === 'release-etag'
+          ) {
+            backgroundWorkGateRef.current?.release();
+          } else {
+            backgroundWorkGateRef.current?.releaseWhenSettled();
+          }
+          setPageLoading(false);
+          setError(undefined);
+          updateHistory('document');
+          current.onLoad?.(event as WebViewNavigationEvent);
+          current.onLoadEnd?.(event as WebViewNavigationEvent);
+          current.onNavigationStateChange?.(envelope.nativeEvent as unknown as WebViewNavigation);
+          return;
+        case 'loadProgress':
+          current.onLoadProgress?.(event as WebViewProgressEvent);
+          return;
+        case 'loadStart':
+          updateHistory('document');
+          current.onLoadStart?.(event as WebViewNavigationEvent);
+          current.onNavigationStateChange?.(envelope.nativeEvent as unknown as WebViewNavigation);
+          return;
+        case 'loadSubResourceError':
+          current.onLoadSubResourceError?.(event as WebViewErrorEvent);
+          return;
+        case 'message':
+          if (typeof envelope.nativeEvent.data === 'string') {
+            const history = historyStateFromMessage(envelope.nativeEvent.data, {
+              canGoBack:
+                typeof envelope.nativeEvent.canGoBack === 'boolean'
+                  ? envelope.nativeEvent.canGoBack
+                  : false,
+              canGoForward:
+                typeof envelope.nativeEvent.canGoForward === 'boolean'
+                  ? envelope.nativeEvent.canGoForward
+                  : false,
+            });
+            if (history) {
+              historyRef.current = history;
+              current.onHistoryChange?.(history);
+              return;
+            }
+          }
+          current.onMessage?.(event as WebViewMessageEvent);
+          return;
+        case 'openWindow':
+          current.onOpenWindow?.(event as WebViewOpenWindowEvent);
+          return;
+        case 'renderProcessGone':
+          current.onRenderProcessGone?.(event as WebViewRenderProcessGoneEvent);
+          return;
+        case 'runtimeError': {
+          const description = envelope.nativeEvent.description;
+          const message = typeof description === 'string' ? description : 'WebView runtime error';
+          const nextError = new Error(message);
+          current.onBundleError?.(nextError);
+          return;
+        }
+        case 'scroll':
+          current.onScroll?.(event as WebViewScrollEvent);
+          return;
+        case 'sourceChanged':
+          current.onSourceChanged?.(event as WebViewNavigationEvent);
+      }
+    }, []);
+
+    const eventCallback = useMemo(
+      () => callback((event: string) => handleEvent(event)),
+      [handleEvent]
+    );
+    const shouldStartCallback = useMemo(
+      () =>
+        callback((serialized: string): boolean => {
+          let request: ShouldStartLoadRequest;
+          try {
+            request = JSON.parse(serialized) as ShouldStartLoadRequest;
+          } catch {
+            return false;
+          }
+          const current = callbacksRef.current;
+          if (current.onShouldStartLoadWithRequest?.(request) === false) return false;
+          const whitelist = current.originWhitelist ?? DEFAULT_ORIGIN_WHITELIST;
+          if (isOriginAllowed(request.url, whitelist)) return true;
+          void Linking.openURL(request.url).catch(() => undefined);
+          return false;
+        }),
+      []
+    );
+
+    const sourceIsHtml = source !== undefined && 'html' in source;
+    const sourceIsUri = source !== undefined && 'uri' in source;
+    const sourceIsEmpty = source === undefined && virtualUrl === undefined;
+    const usesDirectSource =
+      (sourceIsUri &&
+        (!durableCacheEnabled ||
+          (source.method !== undefined && source.method.toUpperCase() !== 'GET') ||
+          source.body !== undefined ||
+          source.headers !== undefined ||
+          !source.uri.startsWith('https://'))) ||
+      (!durableCacheEnabled && virtualUrl !== undefined);
+    const effectiveVirtualUrl =
+      sourceIsHtml || sourceIsEmpty || usesDirectSource
+        ? undefined
+        : remoteUrl({ source, virtualUrl });
+    const initialHistoryUrl =
+      effectiveVirtualUrl ??
+      (sourceIsUri
+        ? source.uri
+        : sourceIsHtml
+          ? (source.baseUrl ?? 'about:blank')
+          : (virtualUrl ?? 'about:blank'));
+    const sourceKey = JSON.stringify(source ?? null);
+    const cacheRoot =
+      effectiveVirtualUrl === undefined
+        ? undefined
+        : (cacheDirectory ?? cacheDirectoryForOrigin(effectiveVirtualUrl, cacheAdapter));
+    const cacheMaxBytes = cachePolicy?.maxBytes;
+    const cacheMaxGenerations = cachePolicy?.maxGenerations;
+    const cacheMaxInlineBytes = cachePolicy?.maxInlineBytes;
+    const trustedAssetOriginsKey = JSON.stringify([...(trustedAssetOrigins ?? [])].sort());
+
+    const rollback = useCallback(async (): Promise<boolean> => {
+      const current = bundleRef.current;
+      if (
+        !current ||
+        current.generationId === 'external' ||
+        cacheRoot === undefined ||
+        effectiveVirtualUrl === undefined
+      ) {
+        return false;
+      }
+      const operationEpoch = ++documentEpochRef.current;
+      const previous = await rollbackWebBundle(
+        cacheRoot,
         cacheAdapter,
+        current.generationId,
+        effectiveVirtualUrl
+      );
+      if (!previous || documentEpochRef.current !== operationEpoch) return false;
+      const preparedLease = retainWebBundle(cacheRoot, previous.generationId);
+      const nextDocument = cacheDocument(
+        createWebBundleCacheRequest({
+          allowContentSecurityPolicyBypass,
+          cacheDirectory: cacheRoot,
+          cachePolicy,
+          generationId: previous.generationId,
+          trustedAssetOrigins,
+          validationMode,
+          virtualUrl: effectiveVirtualUrl,
+        })
+      );
+      if (documentEpochRef.current !== operationEpoch) {
+        preparedLease();
+        return false;
+      }
+      leaseReleaseRef.current?.();
+      leaseReleaseRef.current = preparedLease;
+      bundleRef.current = previous;
+      setError(undefined);
+      setDocument(nextDocument);
+      callbacksRef.current.onCacheRollback?.(previous);
+      return true;
+    }, [
+      allowContentSecurityPolicyBypass,
+      cacheAdapter,
+      cachePolicy,
+      cacheRoot,
+      effectiveVirtualUrl,
+      trustedAssetOrigins,
+      validationMode,
+    ]);
+    rollbackRef.current = rollback;
+
+    useImperativeHandle(
+      forwardedRef,
+      () => ({
+        clearCache: (includeDiskFiles) => hostRef.current?.clearCache(includeDiskFiles),
+        clearFormData: () => hostRef.current?.clearFormData(),
+        clearHistory: () => {
+          hostRef.current?.clearHistory();
+          historyRef.current = emptyHistoryState(historyRef.current.url);
+          callbacksRef.current.onHistoryChange?.(historyRef.current);
+        },
+        getHistoryState: () => historyRef.current,
+        goBack: () => hostRef.current?.goBack(),
+        goForward: () => hostRef.current?.goForward(),
+        injectJavaScript: (script) => hostRef.current?.injectJavaScript(script),
+        postMessage: (message) => hostRef.current?.postMessage(message),
+        reload: () => {
+          setError(undefined);
+          setPageLoading(true);
+          hostRef.current?.reload();
+        },
+        requestFocus: () => hostRef.current?.requestFocus(),
+        rollback,
+        stopLoading: () => hostRef.current?.stopLoading(),
+      }),
+      [rollback]
+    );
+
+    useEffect(() => {
+      let active = true;
+      const controller = new AbortController();
+      const documentEpoch = ++documentEpochRef.current;
+      bundleRef.current = undefined;
+      rollbackAttemptedRef.current = false;
+      setDocument(undefined);
+      setError(undefined);
+      setStatus('Looking for a durable local bundle…');
+      historyRef.current = emptyHistoryState(initialHistoryUrl);
+      if (sourceIsEmpty) {
+        setDocument(htmlSourceDocument({ html: '' }));
+        return () => {
+          active = false;
+          controller.abort();
+        };
+      }
+      if (sourceIsHtml) {
+        const currentSource = sourceRef.current;
+        if (!currentSource || !('html' in currentSource)) return;
+        setDocument(htmlSourceDocument(currentSource));
+        return () => {
+          active = false;
+          controller.abort();
+        };
+      }
+      if (usesDirectSource) {
+        const currentSource = sourceRef.current;
+        if (currentSource && 'uri' in currentSource) {
+          setDocument(directSourceDocument(currentSource));
+        } else if (virtualUrl !== undefined) {
+          setDocument(directSourceDocument({ uri: virtualUrl }));
+        }
+        return () => {
+          active = false;
+          controller.abort();
+        };
+      }
+      const nextVirtualUrl = effectiveVirtualUrl!;
+      assertHttpsUrl(nextVirtualUrl);
+
+      const cacheRequest = createWebBundleCacheRequest({
         allowContentSecurityPolicyBypass,
-        cacheDirectory,
+        cacheDirectory: cacheRoot!,
         cachePolicy:
           cacheMaxBytes === undefined &&
           cacheMaxGenerations === undefined &&
@@ -689,285 +775,267 @@ export const LocalWebView = forwardRef<LocalWebViewHandle, LocalWebViewProps>(fu
                 maxGenerations: cacheMaxGenerations,
                 maxInlineBytes: cacheMaxInlineBytes,
               },
-        forceRefresh,
-        onProgress: (message) => {
-          if (active && loadEpochRef.current === loadEpoch) setStatus(message);
-        },
-        signal: controller.signal,
-        trustedAssetOrigins:
-          normalizedTrustedOrigins.length > 0 ? normalizedTrustedOrigins : undefined,
-        virtualUrl,
+        trustedAssetOrigins: JSON.parse(trustedAssetOriginsKey) as string[],
+        validationMode,
+        virtualUrl: nextVirtualUrl,
       });
-    });
-
-    bundlePromise
-      .then(async (bundle) => {
+      let publishedGenerationId: string | undefined;
+      const waitForVisibleDocument = (): Promise<void> =>
+        new Promise<void>((resolve) => {
+          let released = false;
+          let settleTimeout: ReturnType<typeof setTimeout> | undefined;
+          const timeout = setTimeout(() => {
+            release();
+          }, REMOTE_LOAD_INSTALL_TIMEOUT_MS);
+          const release = () => {
+            if (released) return;
+            released = true;
+            clearTimeout(timeout);
+            if (settleTimeout) clearTimeout(settleTimeout);
+            if (backgroundWorkGateRef.current?.release === release) {
+              backgroundWorkGateRef.current = undefined;
+            }
+            resolve();
+          };
+          const releaseWhenSettled = () => {
+            if (released || settleTimeout) return;
+            settleTimeout = setTimeout(release, BACKGROUND_WORK_SETTLE_MS);
+          };
+          backgroundWorkGateRef.current = { release, releaseWhenSettled };
+        });
+      let initialVisibleLoad: Promise<void> | undefined;
+      if (sourcePath === undefined) {
+        initialVisibleLoad = waitForVisibleDocument();
+        setStatus('Opening the durable local bundle…');
+        setDocument(cacheDocument(cacheRequest));
+      }
+      const registerLocalBundle = (bundle: MirroredWebBundle): void => {
         const preparedLease =
-          bundle.generationId === 'external'
+          bundle.generationId === 'external' || cacheRoot === undefined
             ? undefined
             : retainWebBundle(cacheRoot, bundle.generationId);
-        const nextCapability = createAssetCapability();
-        const contents = await buildBundleHtml(bundle, nextCapability).catch((reason: unknown) => {
-          preparedLease?.();
-          throw reason;
-        });
-        if (!active || loadEpochRef.current !== loadEpoch) {
+        if (!active || documentEpochRef.current !== documentEpoch) {
           preparedLease?.();
           return;
         }
-        activateBundle(bundle, contents, nextCapability, preparedLease);
+        leaseReleaseRef.current?.();
+        leaseReleaseRef.current = preparedLease;
+        bundleRef.current = bundle;
         callbacksRef.current.onBundleReady?.(bundle);
-        callbacksRef.current.onBundleStored?.(bundle);
-      })
-      .catch((reason: unknown) => {
-        if (!active || loadEpochRef.current !== loadEpoch) return;
-        const nextError = reason instanceof Error ? reason : new Error(String(reason));
-        setError(nextError);
-        callbacksRef.current.onBundleError?.(nextError);
-      });
-
-    return () => {
-      active = false;
-      controller.abort();
-      if (loadEpochRef.current === loadEpoch) loadEpochRef.current += 1;
-    };
-  }, [
-    activateBundle,
-    cacheAdapter,
-    allowContentSecurityPolicyBypass,
-    buildBundleHtml,
-    cacheDirectory,
-    cacheRoot,
-    cacheMaxBytes,
-    cacheMaxGenerations,
-    cacheMaxInlineBytes,
-    forceRefresh,
-    invalidateAssetStreams,
-    sourcePath,
-    trustedAssetOriginsKey,
-    virtualUrl,
-  ]);
-
-  const observeDocument = (documentId: string | undefined): boolean => {
-    if (typeof documentId !== 'string' || documentId.length < 16 || documentId.length > 128) {
-      return false;
-    }
-    if (activeDocumentIdRef.current === documentId) return true;
-    if (retiredDocumentIdsRef.current.has(documentId)) return false;
-    if (activeDocumentIdRef.current !== undefined) {
-      retiredDocumentIdsRef.current.add(activeDocumentIdRef.current);
-    }
-    if (loadStartAwaitingDocumentRef.current) {
-      loadStartAwaitingDocumentRef.current = false;
-    } else {
-      invalidateAssetStreams('A new main document started using the local bridge', false);
-      documentObservedBeforeLoadStartRef.current = true;
-    }
-    activeDocumentIdRef.current = documentId;
-    return true;
-  };
-
-  const handleMessage = (event: WebViewMessageEvent) => {
-    const asset = parseAssetMessage(event.nativeEvent.data);
-    if (asset) {
-      if (
-        asset.direction !== 'web' ||
-        !asset.requestId ||
-        asset.capability !== assetCapabilityRef.current
-      ) {
-        onMessage?.(event);
-        return;
-      }
-      const bundleOrigin = bundleRef.current && httpOrigin(bundleRef.current.baseUrl);
-      const senderOrigin = httpOrigin(event.nativeEvent.url);
-      if (!bundleOrigin || senderOrigin !== bundleOrigin) {
-        onMessage?.(event);
-        return;
-      }
-      if (!observeDocument(asset.documentId)) {
-        onMessage?.(event);
-        return;
-      }
-      const streamKey = assetStreamKey(asset.capability, asset.requestId, bundleEpochRef.current);
-      if (asset.kind === 'request' && asset.url) {
-        void streamLocalAsset(streamKey, asset.requestId, asset.url, asset.start, asset.end);
-      } else if (asset.kind === 'ack') {
-        const acknowledgement = assetAcknowledgementsRef.current.get(streamKey);
-        assetAcknowledgementsRef.current.delete(streamKey);
-        acknowledgement?.resolve();
-      } else if (asset.kind === 'cancel') {
-        const queued = queuedAssetStreamsRef.current.get(streamKey);
-        const active = activeAssetStreamsRef.current.has(streamKey);
-        const acknowledgement = assetAcknowledgementsRef.current.get(streamKey);
-        if (!queued && !active && !acknowledgement) return;
-        cancelledAssetRequestsRef.current.add(streamKey);
-        queuedAssetStreamsRef.current.delete(streamKey);
-        queued?.resolve(false);
-        assetAcknowledgementsRef.current.delete(streamKey);
-        acknowledgement?.reject(new Error('Local asset stream was cancelled'));
-      }
-      return;
-    }
-    const envelope = bridgeMessageEnvelope(event.nativeEvent.data);
-    if (envelope?.channel === HISTORY_MESSAGE_CHANNEL) {
-      const bundleOrigin = bundleRef.current && httpOrigin(bundleRef.current.baseUrl);
-      const senderOrigin = httpOrigin(event.nativeEvent.url);
-      if (
-        envelope.capability !== assetCapabilityRef.current ||
-        !bundleOrigin ||
-        senderOrigin !== bundleOrigin
-      ) {
-        onMessage?.(event);
-        return;
-      }
-      if (!observeDocument(envelope.documentId)) {
-        onMessage?.(event);
-        return;
-      }
-    }
-    const nextHistory = historyStateFromMessage(event.nativeEvent.data, event.nativeEvent);
-    if (nextHistory) {
-      historyRef.current = nextHistory;
-      onHistoryChange?.(nextHistory);
-      return;
-    }
-    onMessage?.(event);
-  };
-
-  const handleNavigationStateChange = (navigation: WebViewNavigation) => {
-    const bundleOrigin = bundleRef.current && httpOrigin(bundleRef.current.baseUrl);
-    const navigationOrigin = httpOrigin(navigation.url);
-    if (bundleOrigin && navigationOrigin && navigationOrigin !== bundleOrigin) {
-      invalidateAssetStreams('The main document left the active bundle origin', false);
-      initialBundleLoadRef.current = 'complete';
-      historyRef.current = {
-        ...emptyHistoryState(navigation.url),
-        canGoBack: navigation.canGoBack,
-        canGoForward: navigation.canGoForward,
-        navigationType: 'document',
       };
-    } else {
-      historyRef.current = {
-        ...historyRef.current,
-        canGoBack: navigation.canGoBack,
-        canGoForward: navigation.canGoForward,
-        url: navigation.url,
+      const showRemoteDocument = (): void => {
+        if (!active || documentEpochRef.current !== documentEpoch) return;
+        leaseReleaseRef.current?.();
+        leaseReleaseRef.current = undefined;
+        bundleRef.current = undefined;
+        rollbackAttemptedRef.current = false;
+        setStatus('Loading the remote site while its durable copy is saved in the background…');
+        setDocument(directSourceDocument({ uri: nextVirtualUrl }));
       };
-    }
-    onHistoryChange?.(historyRef.current);
-    onNavigationStateChange?.(navigation);
-  };
+      const showValidatedGeneration = (bundle: MirroredWebBundle): void => {
+        registerLocalBundle(bundle);
+        if (bundle.generationId === publishedGenerationId) return;
+        setDocument(
+          cacheDocument({
+            ...cacheRequest,
+            generationId: bundle.generationId,
+          })
+        );
+      };
 
-  const handleLoadStart: NonNullable<WebViewProps['onLoadStart']> = (event) => {
-    if (initialBundleLoadRef.current === 'pending') {
-      const bundleOrigin = bundleRef.current && httpOrigin(bundleRef.current.baseUrl);
-      initialBundleLoadRef.current =
-        bundleOrigin && httpOrigin(event.nativeEvent.url) === bundleOrigin ? 'loading' : 'complete';
-    } else if (initialBundleLoadRef.current === 'loading') {
-      initialBundleLoadRef.current = 'complete';
-    }
-    if (documentObservedBeforeLoadStartRef.current) {
-      documentObservedBeforeLoadStartRef.current = false;
-      loadStartAwaitingDocumentRef.current = false;
-    } else {
-      invalidateAssetStreams('The main document started a new load', false);
-      if (activeDocumentIdRef.current !== undefined) {
-        retiredDocumentIdsRef.current.add(activeDocumentIdRef.current);
+      if (sourcePath !== undefined) {
+        void readMirroredWebBundle(sourcePath, cacheAdapter)
+          .then((sourceHtml) => {
+            const bundle: MirroredWebBundle = {
+              baseUrl: nextVirtualUrl,
+              downloadedAssets: [],
+              generationId: 'external',
+              localAssets: {},
+              rollbackAvailable: false,
+              sourcePath,
+              totalBytes: 0,
+              usedCachedBundle: true,
+            };
+            registerLocalBundle(bundle);
+            setDocument(runtimeDocument(bundle, sourceHtml));
+          })
+          .catch((reason: unknown) => {
+            if (!active || controller.signal.aborted) return;
+            const nextError = reason instanceof Error ? reason : new Error(String(reason));
+            callbacksRef.current.onBundleError?.(nextError);
+            setError({
+              canGoBack: false,
+              canGoForward: false,
+              code: -1,
+              description: nextError.message,
+              domain: 'ReactNativeLocalWebView',
+              loading: false,
+              lockIdentifier: 0,
+              title: '',
+              url: nextVirtualUrl,
+            });
+          });
+      } else {
+        void resolveWebBundle({
+          cacheAdapter,
+          allowContentSecurityPolicyBypass,
+          cacheDirectory,
+          cachePolicy:
+            cacheMaxBytes === undefined &&
+            cacheMaxGenerations === undefined &&
+            cacheMaxInlineBytes === undefined
+              ? undefined
+              : {
+                  maxBytes: cacheMaxBytes,
+                  maxGenerations: cacheMaxGenerations,
+                  maxInlineBytes: cacheMaxInlineBytes,
+                },
+          forceRefresh,
+          onPublishedBundle: async (publishedBundle) => {
+            publishedGenerationId = publishedBundle?.generationId;
+            if (publishedBundle) {
+              registerLocalBundle(publishedBundle);
+              await initialVisibleLoad;
+            } else {
+              // The native loader already falls back to this URL on a cache miss.
+              await initialVisibleLoad;
+            }
+          },
+          onCachedBundle: async (cachedBundle) => {
+            if (cachedBundle) {
+              if (cachedBundle.generationId === publishedGenerationId) return;
+              const loaded = waitForVisibleDocument();
+              showValidatedGeneration(cachedBundle);
+              await loaded;
+            } else if (publishedGenerationId === undefined) {
+              // The native cache miss is already displaying the remote document.
+            } else {
+              showRemoteDocument();
+            }
+          },
+          onProgress: (message) => {
+            if (active) setStatus(message);
+          },
+          signal: controller.signal,
+          trustedAssetOrigins: JSON.parse(trustedAssetOriginsKey) as string[],
+          validationMode,
+          virtualUrl: nextVirtualUrl,
+        })
+          .then((bundle) => {
+            if (!active || documentEpochRef.current !== documentEpoch) return;
+            callbacksRef.current.onBundleStored?.(bundle);
+          })
+          .catch((reason: unknown) => {
+            if (!active || controller.signal.aborted) return;
+            const nextError = reason instanceof Error ? reason : new Error(String(reason));
+            callbacksRef.current.onBundleError?.(nextError);
+          });
       }
-      activeDocumentIdRef.current = undefined;
-      loadStartAwaitingDocumentRef.current = true;
-    }
-    onLoadStart?.(event);
-  };
 
-  const handleLoad: NonNullable<WebViewProps['onLoad']> = (event) => {
-    initialBundleLoadRef.current = 'complete';
-    onLoad?.(event);
-  };
+      return () => {
+        active = false;
+        backgroundWorkGateRef.current?.release();
+        controller.abort();
+        documentEpochRef.current += 1;
+        leaseReleaseRef.current?.();
+        leaseReleaseRef.current = undefined;
+        bundleRef.current = undefined;
+      };
+    }, [
+      allowContentSecurityPolicyBypass,
+      cacheAdapter,
+      cacheDirectory,
+      durableCacheEnabled,
+      cacheMaxBytes,
+      cacheMaxGenerations,
+      cacheMaxInlineBytes,
+      cacheRoot,
+      effectiveVirtualUrl,
+      forceRefresh,
+      initialHistoryUrl,
+      sourceKey,
+      sourceIsEmpty,
+      sourceIsHtml,
+      sourcePath,
+      trustedAssetOriginsKey,
+      usesDirectSource,
+      validationMode,
+      virtualUrl,
+    ]);
 
-  const handleError: NonNullable<WebViewProps['onError']> = (event) => {
-    onError?.(event);
-    const bundleOrigin = bundleRef.current && httpOrigin(bundleRef.current.baseUrl);
-    const failedOrigin = httpOrigin(event.nativeEvent.url);
-    const failedInitialBundleLoad =
-      initialBundleLoadRef.current === 'loading' &&
-      bundleOrigin !== undefined &&
-      failedOrigin === bundleOrigin;
-    initialBundleLoadRef.current = 'complete';
-    if (
-      failedInitialBundleLoad &&
-      bundleRef.current?.rollbackAvailable &&
-      !rollbackAttemptedRef.current
-    ) {
-      rollbackAttemptedRef.current = true;
-      void rollback().catch((reason: unknown) => {
-        const nextError = reason instanceof Error ? reason : new Error(String(reason));
-        setError(nextError);
-        callbacksRef.current.onBundleError?.(nextError);
-      });
-    }
-  };
-
-  if (error) {
-    return renderError ? (
-      renderError(error)
-    ) : (
-      <View style={[styles.center, style]}>
-        <Text style={styles.error}>{error.message}</Text>
+    const loading = pageLoading;
+    const errorView = error
+      ? renderError?.(error.domain, error.code, error.description)
+      : undefined;
+    return (
+      <View style={[styles.container, containerStyle]}>
+        {preparedDocument ? (
+          <LocalWebViewHost
+            {...forwardedViewProps}
+            assetsJson={preparedDocument.assetsJson}
+            baseUrl={preparedDocument.baseUrl}
+            cacheRequestJson={preparedDocument.cacheRequestJson}
+            configurationJson={configurationJson}
+            documentId={preparedDocument.documentId}
+            html={preparedDocument.html}
+            hybridRef={callback((ref) => {
+              hostRef.current = ref;
+            })}
+            onEvent={eventCallback}
+            onShouldStartLoadWithRequest={shouldStartCallback}
+            sourceJson={preparedDocument.sourceJson}
+            style={[styles.webView, style]}
+            {...(props.nativeConfig?.props as Record<string, unknown> | undefined)}
+          />
+        ) : null}
+        {error
+          ? (errorView ?? (
+              <View style={styles.center}>
+                <Text style={styles.error}>{error.description}</Text>
+              </View>
+            ))
+          : loading
+            ? (renderLoading?.() ?? (
+                <View style={styles.center}>
+                  <ActivityIndicator />
+                  <Text style={styles.status}>{status}</Text>
+                </View>
+              ))
+            : null}
       </View>
     );
   }
+);
 
-  if (!html) {
-    return renderLoading ? (
-      renderLoading(status)
-    ) : (
-      <View style={[styles.center, style]}>
-        <ActivityIndicator />
-        <Text style={styles.status}>{status}</Text>
-      </View>
-    );
-  }
-
-  const documentStartScript = createDocumentStartScript(
-    assetCapability,
-    httpOrigin(documentBaseUrl) ?? '',
-    bundleRef.current?.localAssets ?? {},
-    injectedJavaScriptBeforeContentLoaded
-  );
-
-  return (
-    <WebView
-      {...viewProps}
-      allowsBackForwardNavigationGestures={allowsBackForwardNavigationGestures}
-      injectedJavaScriptBeforeContentLoaded={documentStartScript}
-      key={assetCapability}
-      onError={handleError}
-      onLoad={handleLoad}
-      onLoadStart={handleLoadStart}
-      onMessage={handleMessage}
-      onNavigationStateChange={handleNavigationStateChange}
-      ref={webViewRef}
-      source={{ baseUrl: documentBaseUrl, html }}
-      style={style}
-    />
-  );
-});
+export const LocalWebView = Object.assign(LocalWebViewImplementation, {
+  isFileUploadSupported: async (): Promise<boolean> => true,
+}) as LocalWebViewComponent;
 
 const styles = StyleSheet.create({
   center: {
     alignItems: 'center',
     backgroundColor: '#f7f4ed',
+    bottom: 0,
     justifyContent: 'center',
-    padding: 32,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  container: {
+    flex: 1,
+    overflow: 'hidden',
   },
   error: {
-    color: '#a32929',
-    textAlign: 'center',
+    color: '#b00020',
+    padding: 16,
   },
   status: {
-    color: '#302d29',
-    marginTop: 12,
+    marginTop: 8,
+    paddingHorizontal: 16,
     textAlign: 'center',
+  },
+  webView: {
+    flex: 1,
   },
 });

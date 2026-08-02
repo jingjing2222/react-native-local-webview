@@ -20,7 +20,7 @@ const scenarioResults = result.reports.filter((report) => report.kind === 'scena
 const failures = [];
 const completion = result.reports.findLast((report) => report.kind === 'complete');
 const suite = completion?.suite === 'smoke' ? 'smoke' : 'full';
-const runtime = completion?.runtime === 'remote' ? 'remote' : completion?.runtime || 'bridge';
+const runtime = completion?.runtime === 'remote' ? 'remote' : completion?.runtime || 'local';
 const isRemote = runtime === 'remote';
 const expectedScenarioCount = suite === 'smoke' ? (isRemote ? 7 : 9) : isRemote ? 17 : 19;
 
@@ -56,6 +56,12 @@ for (const scenario of scenarioResults) {
   if (isRemote && scenario.phase === 'offline' && value?.expectedError) {
     continue;
   }
+  if (!isRemote && scenario.label.endsWith('-no-etag')) {
+    if (!value?.expectedError || !/entry response to include an ETag/i.test(value.error ?? '')) {
+      failures.push(`${scenario.label}/${scenario.phase} accepted a release without an ETag.`);
+    }
+    continue;
+  }
   if (!value?.page || (!isRemote && !value.storedBundle)) {
     failures.push(
       `${scenario.label}/${scenario.phase} did not produce the required runtime and page metrics.`
@@ -74,17 +80,11 @@ for (const scenario of scenarioResults) {
     }
   }
   if (!isRemote && scenario.phase === 'warm-304') {
-    const expected = value.storedBundle.downloadedAssets.length;
     const notModified = requests.filter((request) => request.status === 304).length;
-    if (notModified !== expected) {
+    if (notModified !== 1) {
       failures.push(
-        `${scenario.label}/warm-304 revalidated ${notModified}/${expected} resources with 304.`
+        `${scenario.label}/warm-304 used ${notModified} conditional responses instead of one release 304.`
       );
-    }
-  }
-  if (!isRemote && scenario.phase === 'warm-no-etag') {
-    if (!requests.some((request) => request.status === 200 || request.status === 206)) {
-      failures.push(`${scenario.label}/warm-no-etag did not redownload ETag-less resources.`);
     }
   }
   if (scenario.label === 'csp-cookie-range-worker' && scenario.phase === 'csp-bypass') {

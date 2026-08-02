@@ -15,10 +15,11 @@
 #include <fbjni/fbjni.h>
 #include <NitroModules/HybridObjectRegistry.hpp>
 
-#include "JHybridNativeLocalWebViewSpec.hpp"
+#include "JHybridLocalWebViewSpec.hpp"
 #include "JFunc_void_std__string.hpp"
 #include "JFunc_std__shared_ptr_Promise_bool___std__string.hpp"
-#include "views/JHybridNativeLocalWebViewStateUpdater.hpp"
+#include "views/JHybridLocalWebViewStateUpdater.hpp"
+#include "JHybridLocalWebViewCacheSpec.hpp"
 #include <NitroModules/DefaultConstructableObject.hpp>
 
 namespace margelo::nitro::localwebview {
@@ -29,12 +30,20 @@ int initialize(JavaVM* vm) {
   });
 }
 
-struct JHybridNativeLocalWebViewSpecImpl: public jni::JavaClass<JHybridNativeLocalWebViewSpecImpl, JHybridNativeLocalWebViewSpec::JavaPart> {
-  static constexpr auto kJavaDescriptor = "Lcom/margelo/nitro/localwebview/HybridNativeLocalWebView;";
-  static std::shared_ptr<JHybridNativeLocalWebViewSpec> create() {
-    static const auto constructorFn = javaClassStatic()->getConstructor<JHybridNativeLocalWebViewSpecImpl::javaobject()>();
-    jni::local_ref<JHybridNativeLocalWebViewSpec::JavaPart> javaPart = javaClassStatic()->newObject(constructorFn);
-    return javaPart->getJHybridNativeLocalWebViewSpec();
+struct JHybridLocalWebViewSpecImpl: public jni::JavaClass<JHybridLocalWebViewSpecImpl, JHybridLocalWebViewSpec::JavaPart> {
+  static constexpr auto kJavaDescriptor = "Lcom/margelo/nitro/localwebview/LocalWebView;";
+  static std::shared_ptr<JHybridLocalWebViewSpec> create() {
+    static const auto constructorFn = javaClassStatic()->getConstructor<JHybridLocalWebViewSpecImpl::javaobject()>();
+    jni::local_ref<JHybridLocalWebViewSpec::JavaPart> javaPart = javaClassStatic()->newObject(constructorFn);
+    return javaPart->getJHybridLocalWebViewSpec();
+  }
+};
+struct JHybridLocalWebViewCacheSpecImpl: public jni::JavaClass<JHybridLocalWebViewCacheSpecImpl, JHybridLocalWebViewCacheSpec::JavaPart> {
+  static constexpr auto kJavaDescriptor = "Lcom/margelo/nitro/localwebview/LocalWebViewCache;";
+  static std::shared_ptr<JHybridLocalWebViewCacheSpec> create() {
+    static const auto constructorFn = javaClassStatic()->getConstructor<JHybridLocalWebViewCacheSpecImpl::javaobject()>();
+    jni::local_ref<JHybridLocalWebViewCacheSpec::JavaPart> javaPart = javaClassStatic()->newObject(constructorFn);
+    return javaPart->getJHybridLocalWebViewCacheSpec();
   }
 };
 
@@ -43,16 +52,23 @@ void registerAllNatives() {
   using namespace margelo::nitro::localwebview;
 
   // Register native JNI methods
-  margelo::nitro::localwebview::JHybridNativeLocalWebViewSpec::CxxPart::registerNatives();
+  margelo::nitro::localwebview::JHybridLocalWebViewSpec::CxxPart::registerNatives();
   margelo::nitro::localwebview::JFunc_void_std__string_cxx::registerNatives();
   margelo::nitro::localwebview::JFunc_std__shared_ptr_Promise_bool___std__string_cxx::registerNatives();
-  margelo::nitro::localwebview::views::JHybridNativeLocalWebViewStateUpdater::registerNatives();
+  margelo::nitro::localwebview::views::JHybridLocalWebViewStateUpdater::registerNatives();
+  margelo::nitro::localwebview::JHybridLocalWebViewCacheSpec::CxxPart::registerNatives();
 
   // Register Nitro Hybrid Objects
   HybridObjectRegistry::registerHybridObjectConstructor(
-    "NativeLocalWebView",
+    "LocalWebView",
     []() -> std::shared_ptr<HybridObject> {
-      return JHybridNativeLocalWebViewSpecImpl::create();
+      return JHybridLocalWebViewSpecImpl::create();
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "LocalWebViewCache",
+    []() -> std::shared_ptr<HybridObject> {
+      return JHybridLocalWebViewCacheSpecImpl::create();
     }
   );
 }

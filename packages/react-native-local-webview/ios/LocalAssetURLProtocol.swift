@@ -10,6 +10,56 @@ private struct URLProtocolAssetDescriptor: Decodable {
   let size: Double
 }
 
+struct CachedDocument {
+  let baseUrl: String
+}
+
+private struct CacheRequest: Decodable {
+  let cacheDirectory: String
+  let generationId: String?
+  let maxBytes: Int64
+  let securityPolicyFingerprint: String
+  let validationMode: String
+  let virtualUrl: String
+}
+
+private struct CacheGenerationSummary: Decodable {
+  let generationId: String
+  let securityPolicyFingerprint: String
+  let totalBytes: Int64
+}
+
+private struct CacheState: Decodable {
+  let activeGeneration: String
+  let formatVersion: Int
+  let generations: [CacheGenerationSummary]
+}
+
+private struct CachedAsset: Decodable {
+  let delivery: String
+  let localFile: String?
+  let mediaType: String
+  let responseHeaders: [String: String]?
+  let responseUrl: String
+  let sha256: String
+  let size: Int64
+  let url: String
+}
+
+private struct GenerationManifest: Decodable {
+  let bundleEtag: String?
+  let documentFragment: String
+  let documentFragmentInherited: Bool
+  let documentUrl: String
+  let entryUrl: String
+  let formatVersion: Int
+  let generationId: String
+  let remoteAssets: [CachedAsset]
+  let securityPolicyFingerprint: String
+  let totalBytes: Int64
+  let validationMode: String
+}
+
 private struct URLProtocolByteRange {
   let end: UInt64
   let start: UInt64
@@ -172,6 +222,130 @@ final class LocalAssetURLProtocol: URLProtocol {
       [URLProtocolAssetDescriptor].self,
       from: Data(assetsJson.utf8)
     )
+    return register(
+      assets: decoded,
+      baseUrl: baseUrl,
+      basicAuthCredential: basicAuthCredential,
+      cookieStore: cookieStore,
+      entryData: Data(html.utf8),
+      registryId: registryId
+    )
+  }
+
+  static func configureCachedBundle(
+    cacheRequestJson: String,
+    basicAuthCredential: [String: Any]?,
+    cookieStore: WKHTTPCookieStore,
+    registryId: String
+  ) throws -> CachedDocument? {
+    let decoder = JSONDecoder()
+    let request = try decoder.decode(CacheRequest.self, from: Data(cacheRequestJson.utf8))
+    guard
+      request.maxBytes > 0,
+      isHttps(request.virtualUrl),
+      fingerprintPattern(request.securityPolicyFingerprint)
+    else { return nil }
+    let cacheDirectory = fileURL(request.cacheDirectory)
+    let state = readCacheState(cacheDirectory, decoder: decoder)
+    guard let state else { return nil }
+    let orderedGenerationIds: [String]
+    if let requested = request.generationId {
+      orderedGenerationIds = [requested]
+    } else {
+      orderedGenerationIds = [state.activeGeneration] + state.generations
+        .map(\.generationId)
+        .filter { $0 != state.activeGeneration }
+    }
+    for generationId in orderedGenerationIds {
+      guard
+        generationPattern(generationId),
+        let summary = state.generations.first(where: { $0.generationId == generationId }),
+        summary.securityPolicyFingerprint == request.securityPolicyFingerprint,
+        summary.totalBytes >= 0,
+        summary.totalBytes <= request.maxBytes
+      else { continue }
+      let generationDirectory = cacheDirectory
+        .appendingPathComponent("generations", isDirectory: true)
+        .appendingPathComponent(generationId, isDirectory: true)
+      let manifestURL = generationDirectory.appendingPathComponent("manifest.json")
+      guard
+        let manifestData = try? Data(contentsOf: manifestURL),
+        let manifest = try? decoder.decode(GenerationManifest.self, from: manifestData),
+        manifest.formatVersion == cacheFormatVersion,
+        manifest.generationId == generationId,
+        manifest.securityPolicyFingerprint == request.securityPolicyFingerprint,
+        manifest.validationMode == request.validationMode,
+        manifest.totalBytes == summary.totalBytes,
+        normalized(manifest.entryUrl) == normalized(request.virtualUrl),
+        request.validationMode != "release-etag" || !(manifest.bundleEtag ?? "").isEmpty
+      else { continue }
+      let sourceURL = generationDirectory.appendingPathComponent("index.html")
+      guard let sourceData = try? Data(contentsOf: sourceURL) else { continue }
+      var assets = [URLProtocolAssetDescriptor]()
+      var valid = true
+      for asset in manifest.remoteAssets where asset.delivery == "file" {
+        guard
+          fingerprintPattern(asset.sha256),
+          asset.localFile == "assets/\(asset.sha256)",
+          isHttps(asset.url),
+          isHttps(asset.responseUrl),
+          asset.size >= 0,
+          let localFile = asset.localFile
+        else {
+          valid = false
+          break
+        }
+        assets.append(
+          URLProtocolAssetDescriptor(
+            mediaType: asset.mediaType,
+            originalUrl: asset.url,
+            path: generationDirectory.appendingPathComponent(localFile).path,
+            responseHeaders: asset.responseHeaders,
+            responseUrl: asset.responseUrl,
+            size: Double(asset.size)
+          )
+        )
+      }
+      guard valid, var components = URLComponents(string: manifest.documentUrl) else { continue }
+      if manifest.documentFragmentInherited {
+        components.percentEncodedFragment = URLComponents(string: request.virtualUrl)?
+          .percentEncodedFragment
+      } else {
+        let fragment = String(manifest.documentFragment.drop(while: { $0 == "#" }))
+        components.percentEncodedFragment = fragment.isEmpty ? nil : fragment
+      }
+      guard let runtimeURL = components.url?.absoluteString, isHttps(runtimeURL) else { continue }
+      assets.append(
+        URLProtocolAssetDescriptor(
+          mediaType: "text/html",
+          originalUrl: runtimeURL,
+          path: sourceURL.path,
+          responseHeaders: [:],
+          responseUrl: runtimeURL,
+          size: Double(sourceData.count)
+        )
+      )
+      _ = register(
+        assets: assets,
+        baseUrl: runtimeURL,
+        basicAuthCredential: basicAuthCredential,
+        cookieStore: cookieStore,
+        entryData: sourceData,
+        registryId: registryId
+      )
+      return CachedDocument(baseUrl: runtimeURL)
+    }
+    return nil
+  }
+
+  private static func register(
+    assets decoded: [URLProtocolAssetDescriptor],
+    baseUrl: String,
+    basicAuthCredential: [String: Any]?,
+    cookieStore: WKHTTPCookieStore,
+    entryData: Data,
+    registryId: String
+  ) -> Bool {
     var next = [String: URLProtocolAssetDescriptor]()
     var nextOrigins = Set<String>()
     for asset in decoded {
@@ -203,7 +377,7 @@ final class LocalAssetURLProtocol: URLProtocol {
       assets: next,
       basicAuthCredential: credential,
       cookieStore: cookieStore,
-      entryData: hasEntry ? Data(html.utf8) : nil,
+      entryData: hasEntry ? entryData : nil,
       entryUrl: hasEntry ? normalizedEntryUrl : nil,
       origins: nextOrigins
     )
@@ -211,6 +385,50 @@ final class LocalAssetURLProtocol: URLProtocol {
     registryOrder.append(registryId)
     stateLock.unlock()
     return hasEntry
+  }
+
+  private static let cacheFormatVersion = 14
+
+  private static func fileURL(_ path: String) -> URL {
+    if path.hasPrefix("file://"), let url = URL(string: path), url.isFileURL { return url }
+    return URL(fileURLWithPath: path, isDirectory: true)
+  }
+
+  private static func fingerprintPattern(_ value: String) -> Bool {
+    value.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil
+  }
+
+  private static func generationPattern(_ value: String) -> Bool {
+    value.range(
+      of: #"^\d+-\d+-[a-f0-9]{8}-[a-f0-9]{8}$"#,
+      options: .regularExpression
+    ) != nil
+  }
+
+  private static func isHttps(_ value: String) -> Bool {
+    URL(string: value)?.scheme?.lowercased() == "https"
+  }
+
+  private static func readCacheState(
+    _ cacheDirectory: URL,
+    decoder: JSONDecoder
+  ) -> CacheState? {
+    for name in ["state.json", "state.previous.json"] {
+      let url = cacheDirectory.appendingPathComponent(name)
+      guard
+        let data = try? Data(contentsOf: url),
+        let state = try? decoder.decode(CacheState.self, from: data),
+        state.formatVersion == cacheFormatVersion,
+        generationPattern(state.activeGeneration),
+        state.generations.contains(where: { $0.generationId == state.activeGeneration }),
+        state.generations.allSatisfy({
+          generationPattern($0.generationId) &&
+            fingerprintPattern($0.securityPolicyFingerprint) && $0.totalBytes >= 0
+        })
+      else { continue }
+      return state
+    }
+    return nil
   }
 
   static func unregister(registryId: String) {

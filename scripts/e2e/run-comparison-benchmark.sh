@@ -22,13 +22,13 @@ local_id="${group}-local"
 
 if [[ "$target" == "ios" ]]; then
   BENCHMARK_RUN_ID="$remote_id" scripts/e2e/run-ios-benchmark.sh "$suite" "$origin" remote
-  BENCHMARK_RUN_ID="$local_id" scripts/e2e/run-ios-benchmark.sh "$suite" "$origin" native
+  BENCHMARK_RUN_ID="$local_id" scripts/e2e/run-ios-benchmark.sh "$suite" "$origin" local
 else
   profile="${target#android-}"
   BENCHMARK_RUN_ID="$remote_id" \
     scripts/e2e/run-android-benchmark.sh "$profile" "$suite" "$origin" remote
   BENCHMARK_RUN_ID="$local_id" \
-    scripts/e2e/run-android-benchmark.sh "$profile" "$suite" "$origin" native
+    scripts/e2e/run-android-benchmark.sh "$profile" "$suite" "$origin" local
 fi
 
 node scripts/e2e/compare-benchmark.mjs \

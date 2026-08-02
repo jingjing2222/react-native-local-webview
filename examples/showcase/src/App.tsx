@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Linking, StyleSheet, Text, View } from 'react-native';
-import ReactNativeBlobUtil from 'react-native-blob-util';
-import { createReactNativeBlobUtilCacheAdapter, LocalWebView } from 'react-native-local-webview';
+import { LocalWebView } from 'react-native-local-webview';
 
 import BenchmarkApp, { configurationFromBenchmarkUrl } from './BenchmarkApp';
 import CompatibilityApp, { configurationFromCompatibilityUrl } from './CompatibilityApp';
@@ -28,15 +27,10 @@ export default function App({ benchmarkUrl: initialBenchmarkUrl }: { benchmarkUr
 
 function Showcase() {
   const [origin, setOrigin] = useState('Checking origin…');
-  const cacheAdapter = useMemo(
-    () => createReactNativeBlobUtilCacheAdapter(ReactNativeBlobUtil),
-    []
-  );
 
   return (
     <View style={styles.container}>
       <LocalWebView
-        cacheAdapter={cacheAdapter}
         allowContentSecurityPolicyBypass
         injectedJavaScript={`
           (() => {

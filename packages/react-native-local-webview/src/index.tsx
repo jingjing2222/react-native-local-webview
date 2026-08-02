@@ -1,56 +1,37 @@
-export { LocalWebView as LegacyLocalWebView } from './LocalWebView.native';
-export {
-  NativeLocalWebView,
-  NativeLocalWebView as LocalWebView,
-} from './NativeLocalWebView.native';
-export {
-  createExpoFileSystemCacheAdapter,
-  createReactNativeBlobUtilCacheAdapter,
-  createReactNativeFileAccessCacheAdapter,
-  createReactNativeFsCacheAdapter,
-} from './cacheAdapterPresets';
+export { LocalWebView } from './LocalWebView.native';
+export type { LocalWebViewHistoryState } from './historyState';
 export type {
-  CacheAdapterPresetOptions,
-  ExpoFileSystemLike,
-  ReactNativeBlobUtilCacheAdapterOptions,
-  ReactNativeBlobUtilLike,
-  ReactNativeFileAccessLike,
-  ReactNativeFsLike,
-} from './cacheAdapterPresets';
-export type {
-  LocalWebViewHandle as LegacyLocalWebViewHandle,
-  LocalWebViewHistoryState,
-  LocalWebViewProps as LegacyLocalWebViewProps,
+  LocalWebViewComponent,
+  LocalWebViewHandle,
+  LocalWebViewProps,
 } from './LocalWebView.native';
 export type {
-  NativeLocalWebViewComponent,
-  NativeLocalWebViewHandle,
-  NativeLocalWebViewHandle as LocalWebViewHandle,
-  NativeLocalWebViewProps,
-  NativeLocalWebViewProps as LocalWebViewProps,
-} from './NativeLocalWebView.native';
-export type {
-  CreateLocalWebViewCacheAdapterOptions,
-  LocalWebViewCacheAdapter,
-  LocalWebViewDirectories,
-  LocalWebViewDownloadOptions,
-  LocalWebViewDownloadResult,
-  LocalWebViewFileEncoding,
-  LocalWebViewFileDigests,
-  LocalWebViewFileStat,
-  LocalWebViewHashAlgorithm,
-} from './localWebViewCacheAdapter';
-export {
-  createLocalWebViewCacheAdapter,
-  LocalWebViewDownloadLimitError,
-} from './localWebViewCacheAdapter';
+  FileDownloadEvent,
+  ShouldStartLoadRequest,
+  WebViewError,
+  WebViewErrorEvent,
+  WebViewEvent,
+  WebViewHttpErrorEvent,
+  WebViewMessageEvent,
+  WebViewNavigation,
+  WebViewNavigationEvent,
+  WebViewOpenWindowEvent,
+  WebViewProgressEvent,
+  WebViewProps,
+  WebViewRenderProcessGoneEvent,
+  WebViewScrollEvent,
+  WebViewSource,
+  WebViewSourceHtml,
+  WebViewSourceUri,
+  WebViewTerminatedEvent,
+} from './localWebViewTypes';
 export {
   cacheDirectoryForOrigin,
+  clearLocalWebViewCache,
   readMirroredWebBundle,
-  retainWebBundle,
   rollbackWebBundle,
   resolveWebBundle,
-} from './mirrorWebBundle';
+} from './webBundle';
 export {
   ANDROID_WEBVIEW_PROP_NAMES,
   IOS_WEBVIEW_PROP_NAMES,
@@ -64,5 +45,6 @@ export type {
   CachePolicy,
   MirroredLocalAsset,
   MirroredWebBundle,
-  ResolveWebBundleOptions,
+  WebBundleValidationMode,
 } from './mirrorWebBundle';
+export type { ResolveWebBundleOptions } from './webBundle';

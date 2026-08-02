@@ -34,8 +34,8 @@ function scriptElement(markerName: string, source: string): HtmlElement {
 
 /**
  * Applies the final document policy and both runtime bridges with one HTML5
- * parse/serialize pass. This path runs on the React Native JS thread just
- * before handing the string to react-native-webview.
+ * parse/serialize pass. This path runs on the React Native JS thread before
+ * handing the string to the WebView runtime.
  */
 export function prepareWebViewDocument(
   html: string,
@@ -97,12 +97,11 @@ export function prepareWebViewDocument(
 }
 
 /**
- * The Nitro runtime serves assets inside a real WKWebView/Android WebView HTTPS
- * document and therefore needs neither the JS asset transport nor a History API
- * shim. It only applies the explicit CSP policy and strips bridge scripts that
- * may have been persisted by an older cache generation.
+ * The runtime serves assets inside a real WKWebView/Android WebView HTTPS
+ * document. It applies the explicit CSP policy and removes obsolete bridge
+ * scripts that may have been persisted by an older cache generation.
  */
-export function prepareNativeWebViewDocument(
+export function prepareRuntimeDocument(
   html: string,
   allowContentSecurityPolicyBypass = false,
   documentStartScript?: string
@@ -136,7 +135,7 @@ export function prepareNativeWebViewDocument(
   for (const node of [...removable, ...policies]) removeElement(node);
   if (documentStartScript) {
     if (!head) throw new Error('HTML document does not contain a <head>');
-    const bootstrap = scriptElement('data-local-webview-native-bootstrap', documentStartScript);
+    const bootstrap = scriptElement('data-local-webview-bootstrap', documentStartScript);
     bootstrap.parentNode = head;
     head.childNodes.unshift(bootstrap);
   }

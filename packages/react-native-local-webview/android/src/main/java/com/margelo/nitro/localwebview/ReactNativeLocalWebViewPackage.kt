@@ -5,7 +5,7 @@ import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.model.ReactModuleInfoProvider
 import com.facebook.react.uimanager.ViewManager
-import com.margelo.nitro.localwebview.views.HybridNativeLocalWebViewManager
+import com.margelo.nitro.localwebview.views.HybridLocalWebViewManager as LocalWebViewManager
 
 class ReactNativeLocalWebViewPackage : BaseReactPackage() {
   override fun getModule(
@@ -18,7 +18,7 @@ class ReactNativeLocalWebViewPackage : BaseReactPackage() {
 
   override fun createViewManagers(
     reactContext: ReactApplicationContext,
-  ): List<ViewManager<*, *>> = listOf(HybridNativeLocalWebViewManager())
+  ): List<ViewManager<*, *>> = listOf(LocalWebViewManager())
 
   companion object {
     init {
